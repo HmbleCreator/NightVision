@@ -138,10 +138,54 @@ uv run scripts/benchmark_curves.py
 
 ---
 
-## 📊 Quantitative Verification
+## 📊 Empirical Benchmarks & Visual Verification
 
-Under Quarter-Moon illuminance ($0.01\,\text{lux}$):
-* **Raw CMOS Sensor Output**: $\text{PSNR} = 10.68\,\text{dB} \mid \text{SSIM} = 0.5767$
-* **NightVision Enhanced Output**: $\text{PSNR} = 12.41\,\text{dB} \mid \text{SSIM} = 0.7499$
-* **Signal-to-Noise Ratio Gain**: **$+12\,\text{dB}$ to $+16\,\text{dB}$** in static and low-light regions.
+### 1. Extreme Low-Light Benchmark Suite (6 Scenes from LOL Dataset)
+
+Evaluated across real-world photon-starved captures (`600x400` native resolution) comparing the multi-threaded Desktop FPU engine (`nightvision-core`) against the embedded fixed-point streaming engine (`nightvision-mcu`):
+
+| Scene ID | Raw Luma (Mean) | Raw Range | Desktop FPU (FPS / ms) | MCU Stream (FPS / ms) | Desktop Lap. Var | MCU Lap. Var | PSNR (dB) | SSIM | AEC Regime |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `10.png` | 14.1 | 0..36 | **375.1 FPS (2.67 ms)** | **226.2 FPS (4.42 ms)** | 1765.7 | **1817.7** | **33.21 dB** | **0.9894** | `LowLight` (+2.8 EV) |
+| `100.png` | 9.1 | 0..60 | **438.7 FPS (2.28 ms)** | **218.0 FPS (4.59 ms)** | 2672.5 | **2505.7** | **31.42 dB** | **0.9878** | `LowLight` (+3.5 EV) |
+| `114.png` | 5.3 | 0..65 | **360.5 FPS (2.77 ms)** | **224.8 FPS (4.45 ms)** | 4180.1 | **5352.7** | **30.33 dB** | **0.9672** | `UltraDark` (+4.3 EV) |
+| `115.png` | 10.2 | 0..227 | **412.3 FPS (2.43 ms)** | **232.9 FPS (4.29 ms)** | 2352.3 | **2403.2** | **31.83 dB** | **0.9907** | `LowLight` (+3.3 EV) |
+| `117.png` | 6.0 | 0..53 | **362.0 FPS (2.76 ms)** | **166.0 FPS (6.02 ms)** | 3783.9 | **4554.1** | **31.74 dB** | **0.9725** | `UltraDark` (+4.1 EV) |
+| `121.png` | 5.0 | 0..92 | **369.3 FPS (2.71 ms)** | **221.3 FPS (4.52 ms)** | 4492.4 | **5348.6** | **30.55 dB** | **0.9711** | `UltraDark` (+4.3 EV) |
+
+Each panorama displays 5 synchronized panels from left to right:
+`[1. Raw Low-Light Input | 2. Desktop Color | 3. MCU Color | 4. Desktop White Phosphor | 5. MCU White Phosphor]`
+
+#### Plush Toys (`10.png`)
+![Scene 10 Comparison](assets/benchmarks/10_comparison.png)
+
+#### Warm Shelving (`117.png`)
+![Scene 117 Comparison](assets/benchmarks/117_comparison.png)
+
+#### Deep Shadow Starvation (`121.png`)
+![Scene 121 Comparison](assets/benchmarks/121_comparison.png)
+
+---
+
+### 2. High-Exposure & Mixed-Illumination Suite (4 Scenes)
+
+Evaluated across extreme photodiode well saturation ($255\text{ ADU}$), localized glare flare, and real-world screen capture:
+
+| Image File | Optical Regime | Native Resolution | Raw Luma [Range] | Desktop FPU (FPS / ms) | MCU Stream (FPS / ms) | Desk / MCU Lap. Var | PSNR / SSIM | AEC Regime & Rec. EV |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `High10.jpeg` | 100% Saturation Ceiling | 960×1280 | 255.0 [255..255] | **73.9 FPS (13.5 ms)** | **53.8 FPS (18.6 ms)** | 0.0 / 0.0 | **100.0 dB / 1.0000** | `FullSaturation` (-7.0 EV) |
+| `High_Glare_Bloom.png` | Diffuse Outdoor Glare | 640×480 | 214.4 [65..255] | **321.2 FPS (3.11 ms)** | **194.4 FPS (5.14 ms)** | 1523.9 / 1209.1 | **28.84 dB / 0.9982** | `HighExposure` (-1.0 EV) |
+| `High_Overexposed_Toys.png`| Direct Spotlight Wash | 600×400 | 224.8 [80..255] | **423.1 FPS (2.36 ms)** | **223.3 FPS (4.48 ms)** | 6563.3 / 5702.5 | **26.49 dB / 0.9953** | `FullSaturation` (-5.7 EV) |
+| `VivoBook_Screen.jpg` | Mixed Screen & Dark Keyboard | 768×1024 | 64.8 [0..254] | **128.8 FPS (7.76 ms)** | **75.7 FPS (13.21 ms)** | 2504.4 / 1819.7 | **28.39 dB / 0.9931** | `NormalDaylight` (+0.7 EV) |
+
+#### Real-World Screen & Keyboard Capture (`VivoBook_Screen.jpg`)
+*Lifts dark keyboard shadows while preserving bright text on the emissive screen (+88.5% edge definition).*
+![VivoBook Screen Comparison](assets/benchmarks/VivoBook_Screen_comparison.png)
+
+#### Spotlight Wash Recovery (`High_Overexposed_Toys.png`)
+*Concave power shoulder ($x_{\text{knee}} = 140\text{ ADU}, \gamma = 2.2$) recovers plush embroidery (+305% Desktop Lap. Var).*
+![High Overexposed Toys Comparison](assets/benchmarks/High_Overexposed_Toys_comparison.png)
+
+#### Diffuse Outdoor Glare Recovery (`High_Glare_Bloom.png`)
+![High Glare Bloom Comparison](assets/benchmarks/High_Glare_Bloom_comparison.png)
 
