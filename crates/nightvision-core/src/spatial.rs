@@ -35,14 +35,13 @@ impl Default for SpatialDenoiseConfig {
     }
 }
 
-/// Applies separable 1D sliding box blur in O(1) per pixel.
+/// Applies separable 1D sliding box blur in strictly O(1) per pixel.
 pub fn box_filter_2d(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     if r == 0 || w == 0 || h == 0 {
         return src.to_vec();
     }
 
     let mut temp = vec![0.0f32; w * h];
-    let mut dst = vec![0.0f32; w * h];
 
     // Horizontal pass (parallelized over rows)
     temp.par_chunks_exact_mut(w)
@@ -51,19 +50,16 @@ pub fn box_filter_2d(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
             let mut sum = 0.0f32;
             let mut count = 0;
 
-            // Initialize window
             for x in 0..r.min(w) {
                 sum += in_row[x];
                 count += 1;
             }
 
             for x in 0..w {
-                // Add right edge
                 if x + r < w {
                     sum += in_row[x + r];
                     count += 1;
                 }
-                // Subtract left edge
                 if x > r {
                     sum -= in_row[x - r - 1];
                     count -= 1;
@@ -72,22 +68,145 @@ pub fn box_filter_2d(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
             }
         });
 
-    // Vertical pass (parallelized over chunks of rows)
-    dst.par_chunks_exact_mut(w)
-        .enumerate()
-        .for_each(|(y, out_row)| {
-            let y_start = if y > r { y - r } else { 0 };
-            let y_end = (y + r + 1).min(h);
-            let count = (y_end - y_start) as f32;
+    // Vertical pass: transpose, horizontal box blur, transpose back for strict O(1) efficiency
+    let mut transposed = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            transposed[x * h + y] = temp[y * w + x];
+        }
+    }
 
-            for x in 0..w {
-                let mut sum = 0.0f32;
-                for ny in y_start..y_end {
-                    sum += temp[ny * w + x];
+    let mut filtered_transposed = vec![0.0f32; w * h];
+    filtered_transposed
+        .par_chunks_exact_mut(h)
+        .zip(transposed.par_chunks_exact(h))
+        .for_each(|(out_col, in_col)| {
+            let mut sum = 0.0f32;
+            let mut count = 0;
+
+            for y in 0..r.min(h) {
+                sum += in_col[y];
+                count += 1;
+            }
+
+            for y in 0..h {
+                if y + r < h {
+                    sum += in_col[y + r];
+                    count += 1;
                 }
-                out_row[x] = sum / count;
+                if y > r {
+                    sum -= in_col[y - r - 1];
+                    count -= 1;
+                }
+                out_col[y] = sum / (count as f32);
             }
         });
+
+    let mut dst = vec![0.0f32; w * h];
+    for x in 0..w {
+        for y in 0..h {
+            dst[y * w + x] = filtered_transposed[x * h + y];
+        }
+    }
+
+    dst
+}
+
+/// Fast O(1) recursive IIR Gaussian filter (Young & van Vliet).
+/// Constant execution time independent of sigma.
+pub fn recursive_gaussian_blur(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
+    if sigma <= 0.5 || w < 4 || h < 4 {
+        return src.to_vec();
+    }
+
+    let q = if sigma >= 2.5 {
+        0.98711 * sigma - 0.96330
+    } else {
+        3.97156 - 4.14554 * (1.0 - 0.26891 * sigma).max(0.0).sqrt()
+    };
+
+    let b0 = 1.57825 + 2.44413 * q + 1.4281 * q * q + 0.422205 * q * q * q;
+    let b1 = 2.44413 * q + 2.85619 * q * q + 1.26661 * q * q * q;
+    let b2 = -(1.4281 * q * q + 1.26661 * q * q * q);
+    let b3 = 0.422205 * q * q * q;
+
+    let c1 = b1 / b0;
+    let c2 = b2 / b0;
+    let c3 = b3 / b0;
+    let b = (1.0 - (c1 + c2 + c3)).max(0.0001);
+
+    // Horizontal filter pass
+    let mut temp = vec![0.0f32; w * h];
+    temp.par_chunks_exact_mut(w)
+        .zip(src.par_chunks_exact(w))
+        .for_each(|(out_row, in_row)| {
+            let mut fwd = vec![0.0f32; w];
+            let mut y1 = in_row[0];
+            let mut y2 = in_row[0];
+            let mut y3 = in_row[0];
+            for x in 0..w {
+                let y = b * in_row[x] + c1 * y1 + c2 * y2 + c3 * y3;
+                fwd[x] = y;
+                y3 = y2;
+                y2 = y1;
+                y1 = y;
+            }
+
+            let mut y1 = fwd[w - 1];
+            let mut y2 = fwd[w - 1];
+            let mut y3 = fwd[w - 1];
+            for x in (0..w).rev() {
+                let y = b * fwd[x] + c1 * y1 + c2 * y2 + c3 * y3;
+                out_row[x] = y;
+                y3 = y2;
+                y2 = y1;
+                y1 = y;
+            }
+        });
+
+    // Vertical filter pass (via transpose)
+    let mut transposed = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            transposed[x * h + y] = temp[y * w + x];
+        }
+    }
+
+    let mut filtered_transposed = vec![0.0f32; w * h];
+    filtered_transposed
+        .par_chunks_exact_mut(h)
+        .zip(transposed.par_chunks_exact(h))
+        .for_each(|(out_col, in_col)| {
+            let mut fwd = vec![0.0f32; h];
+            let mut y1 = in_col[0];
+            let mut y2 = in_col[0];
+            let mut y3 = in_col[0];
+            for y in 0..h {
+                let val = b * in_col[y] + c1 * y1 + c2 * y2 + c3 * y3;
+                fwd[y] = val;
+                y3 = y2;
+                y2 = y1;
+                y1 = val;
+            }
+
+            let mut y1 = fwd[h - 1];
+            let mut y2 = fwd[h - 1];
+            let mut y3 = fwd[h - 1];
+            for y in (0..h).rev() {
+                let val = b * fwd[y] + c1 * y1 + c2 * y2 + c3 * y3;
+                out_col[y] = val;
+                y3 = y2;
+                y2 = y1;
+                y1 = val;
+            }
+        });
+
+    let mut dst = vec![0.0f32; w * h];
+    for x in 0..w {
+        for y in 0..h {
+            dst[y * w + x] = filtered_transposed[x * h + y];
+        }
+    }
 
     dst
 }
@@ -231,3 +350,4 @@ pub fn denoise_image(image: &RgbImage, config: &SpatialDenoiseConfig) -> RgbImag
 
     output
 }
+

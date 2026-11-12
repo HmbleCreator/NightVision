@@ -14,3 +14,4 @@ uv run scripts/evaluate.py
 # Generate comparison plots (Lux vs PSNR/SSIM)
 uv run scripts/plot_snr_curves.py
 ```
+

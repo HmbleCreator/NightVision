@@ -19,7 +19,7 @@ pub mod temporal;
 pub use enhancement::{apply_clahe, apply_exposure_and_autogating, apply_retinex, EnhancementConfig};
 pub use metrics::{calculate_psnr, calculate_snr_db, calculate_ssim};
 pub use modes::{render_mode, DisplayMode};
-pub use pipeline::{NightVisionPipeline, PipelineConfig};
+pub use pipeline::{NightVisionPipeline, PipelineConfig, StageBreakdown};
 pub use sensor::{CmosSensorConfig, CmosSensorSimulator, LuxLevel, SensorSimulationStats};
 pub use spatial::{denoise_image, SpatialDenoiseConfig};
 pub use temporal::{AdaptiveTemporalAccumulator, TemporalConfig};

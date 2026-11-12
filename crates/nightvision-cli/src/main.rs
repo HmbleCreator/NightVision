@@ -304,31 +304,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let resolutions = [
                 ("640x480 (VGA / Standard Tactical HUD)", 640, 480),
-                ("1280x720 (HD 720p Real-time Stream)", 1280, 720),
+                ("1280x720 (HD 720p Stream)", 1280, 720),
                 ("1920x1080 (Full HD 1080p Tactical)", 1920, 1080),
             ];
 
             for (label, w, h) in resolutions {
-                println!("Benchmarking: {label}");
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                println!("Resolution: {label}");
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 let frame = generate_synthetic_test_scene(w, h);
-                let mut pipeline = NightVisionPipeline::new(PipelineConfig::default());
 
-                // Warm up
-                for _ in 0..3 {
-                    let _ = pipeline.process_frame(&frame);
+                // --- Mode A: Comprehensive Pipeline (Retinex + CLAHE + Spatial + Temporal) ---
+                let mut full_pipeline = NightVisionPipeline::new(PipelineConfig::default());
+                for _ in 0..2 {
+                    let _ = full_pipeline.process_frame(&frame);
                 }
 
-                let start = Instant::now();
-                for _ in 0..iterations {
-                    let _ = pipeline.process_frame(&frame);
-                }
-                let total_time = start.elapsed();
-                let avg_latency_ms = (total_time.as_secs_f64() * 1000.0) / (iterations as f64);
-                let fps = (iterations as f64) / total_time.as_secs_f64();
+                let mut total_breakdown = nightvision_core::StageBreakdown {
+                    temporal_ms: 0.0,
+                    spatial_ms: 0.0,
+                    retinex_ms: 0.0,
+                    clahe_ms: 0.0,
+                    exposure_autogating_ms: 0.0,
+                    mode_rendering_ms: 0.0,
+                    total_ms: 0.0,
+                };
 
-                println!("  Iterations: {iterations}");
-                println!("  Avg Latency: {:.2} ms", avg_latency_ms);
-                println!("  Throughput:  {:.1} FPS", fps);
+                let iter_count = iterations.min(10);
+                for _ in 0..iter_count {
+                    let (_, bd) = full_pipeline.process_frame_profiled(&frame);
+                    total_breakdown.temporal_ms += bd.temporal_ms;
+                    total_breakdown.spatial_ms += bd.spatial_ms;
+                    total_breakdown.retinex_ms += bd.retinex_ms;
+                    total_breakdown.clahe_ms += bd.clahe_ms;
+                    total_breakdown.exposure_autogating_ms += bd.exposure_autogating_ms;
+                    total_breakdown.mode_rendering_ms += bd.mode_rendering_ms;
+                    total_breakdown.total_ms += bd.total_ms;
+                }
+
+                let n = iter_count as f64;
+                let full_latency = total_breakdown.total_ms / n;
+                let full_fps = 1000.0 / full_latency;
+
+                println!("  [Profile A: Comprehensive High-Fidelity Pipeline]");
+                println!("    ├── Temporal Accumulation:  {:>6.2} ms", total_breakdown.temporal_ms / n);
+                println!("    ├── Guided Spatial Filter:  {:>6.2} ms", total_breakdown.spatial_ms / n);
+                println!("    ├── Multi-Scale Retinex:    {:>6.2} ms", total_breakdown.retinex_ms / n);
+                println!("    ├── Tile-based CLAHE:       {:>6.2} ms", total_breakdown.clahe_ms / n);
+                println!("    ├── Exposure & Auto-Gating: {:>6.2} ms", total_breakdown.exposure_autogating_ms / n);
+                println!("    └── Tactical Mode Render:   {:>6.2} ms", total_breakdown.mode_rendering_ms / n);
+                println!("    => TOTAL LATENCY: {:.2} ms | SUSTAINED: {:.1} FPS", full_latency, full_fps);
+                println!();
+
+                // --- Mode B: Tactical Real-Time Stream (Fast Preset: Temporal + Spatial + CLAHE + Auto-Gating) ---
+                let mut fast_pipeline = NightVisionPipeline::new(PipelineConfig::fast_realtime());
+                for _ in 0..2 {
+                    let _ = fast_pipeline.process_frame(&frame);
+                }
+
+                let start_fast = Instant::now();
+                let fast_iters = iterations;
+                for _ in 0..fast_iters {
+                    let _ = fast_pipeline.process_frame(&frame);
+                }
+                let elapsed_fast = start_fast.elapsed().as_secs_f64() * 1000.0;
+                let fast_latency = elapsed_fast / (fast_iters as f64);
+                let fast_fps = 1000.0 / fast_latency;
+
+                println!("  [Profile B: High-Speed Tactical Stream (Zero-Lag Mode)]");
+                println!("    => TOTAL LATENCY: {:.2} ms | SUSTAINED: {:.1} FPS", fast_latency, fast_fps);
                 println!();
             }
         }

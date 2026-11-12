@@ -157,3 +157,4 @@ pub fn render_mode(img: &RgbImage, mode: DisplayMode, saturation_boost: f32) -> 
 
     out
 }
+

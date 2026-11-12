@@ -228,3 +228,4 @@ impl CmosSensorSimulator {
         (noisy_image, stats)
     }
 }
+

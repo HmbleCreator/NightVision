@@ -10,3 +10,4 @@ description = "Real-time desktop GUI viewer and interactive simulator for digita
 nightvision-core = { path = "../nightvision-core" }
 eframe = "0.29"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+

@@ -140,3 +140,4 @@ Under Quarter-Moon illuminance ($0.01\,\text{lux}$):
 * **Raw CMOS Sensor Output**: $\text{PSNR} = 10.68\,\text{dB} \mid \text{SSIM} = 0.5767$
 * **NightVision Enhanced Output**: $\text{PSNR} = 12.41\,\text{dB} \mid \text{SSIM} = 0.7499$
 * **Signal-to-Noise Ratio Gain**: **$+12\,\text{dB}$ to $+16\,\text{dB}$** in static and low-light regions.
+

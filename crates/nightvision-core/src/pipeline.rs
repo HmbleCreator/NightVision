@@ -43,6 +43,53 @@ impl Default for PipelineConfig {
     }
 }
 
+impl PipelineConfig {
+    /// High-throughput real-time preset optimized for sustained 30+ FPS tactical streams.
+    /// Uses low-overhead guided spatial filtering, temporal accumulation, and adaptive tone curves.
+    pub fn fast_realtime() -> Self {
+        Self {
+            temporal: TemporalConfig {
+                static_blend_weight: 0.90,
+                motion_blend_weight: 0.10,
+                motion_threshold: 0.08,
+                enable_motion_dilation: false,
+            },
+            spatial: SpatialDenoiseConfig {
+                guided_radius: 2,
+                guided_epsilon: 0.015,
+                chroma_denoise_strength: 0.70,
+                iterations: 1,
+            },
+            enhancement: EnhancementConfig {
+                retinex_weight: 0.0,
+                clahe_clip_limit: 2.5,
+                clahe_grid_size: 6,
+                gamma: 0.60,
+                exposure_gain: 2.8,
+                auto_gating_threshold: 0.88,
+            },
+            mode: DisplayMode::TacticalWhitePhosphor,
+            saturation_boost: 1.0,
+            enable_temporal: true,
+            enable_spatial: true,
+            enable_retinex: false,
+            enable_clahe: true,
+        }
+    }
+}
+
+/// Execution latency breakdown per pipeline stage.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct StageBreakdown {
+    pub temporal_ms: f64,
+    pub spatial_ms: f64,
+    pub retinex_ms: f64,
+    pub clahe_ms: f64,
+    pub exposure_autogating_ms: f64,
+    pub mode_rendering_ms: f64,
+    pub total_ms: f64,
+}
+
 /// Integrated Digital Night Vision Pipeline.
 pub struct NightVisionPipeline {
     pub config: PipelineConfig,
@@ -116,4 +163,89 @@ impl NightVisionPipeline {
             self.config.saturation_boost,
         )
     }
+
+    /// Processes frame and measures execution latency for each algorithmic stage.
+    pub fn process_frame_profiled(&mut self, frame: &RgbImage) -> (RgbImage, StageBreakdown) {
+        use std::time::Instant;
+
+        let total_start = Instant::now();
+
+        // 1. Temporal
+        let t0 = Instant::now();
+        let frame_after_temporal = if self.config.enable_temporal {
+            self.temporal_accumulator.config = self.config.temporal.clone();
+            self.temporal_accumulator.process_frame(frame)
+        } else {
+            frame.clone()
+        };
+        let temporal_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        // 2. Spatial
+        let t1 = Instant::now();
+        let frame_after_spatial = if self.config.enable_spatial {
+            denoise_image(&frame_after_temporal, &self.config.spatial)
+        } else {
+            frame_after_temporal
+        };
+        let spatial_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        // 3. Retinex
+        let t2 = Instant::now();
+        let frame_after_retinex = if self.config.enable_retinex {
+            apply_retinex(
+                &frame_after_spatial,
+                self.config.enhancement.retinex_weight,
+            )
+        } else {
+            frame_after_spatial
+        };
+        let retinex_ms = t2.elapsed().as_secs_f64() * 1000.0;
+
+        // 4. CLAHE
+        let t3 = Instant::now();
+        let frame_after_clahe = if self.config.enable_clahe {
+            apply_clahe(
+                &frame_after_retinex,
+                self.config.enhancement.clahe_grid_size,
+                self.config.enhancement.clahe_clip_limit,
+            )
+        } else {
+            frame_after_retinex
+        };
+        let clahe_ms = t3.elapsed().as_secs_f64() * 1000.0;
+
+        // 5. Exposure & Auto-Gating
+        let t4 = Instant::now();
+        let frame_after_exposure = apply_exposure_and_autogating(
+            &frame_after_clahe,
+            self.config.enhancement.exposure_gain,
+            self.config.enhancement.gamma,
+            self.config.enhancement.auto_gating_threshold,
+        );
+        let exposure_autogating_ms = t4.elapsed().as_secs_f64() * 1000.0;
+
+        // 6. Mode rendering
+        let t5 = Instant::now();
+        let output = render_mode(
+            &frame_after_exposure,
+            self.config.mode,
+            self.config.saturation_boost,
+        );
+        let mode_rendering_ms = t5.elapsed().as_secs_f64() * 1000.0;
+
+        let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+        let breakdown = StageBreakdown {
+            temporal_ms,
+            spatial_ms,
+            retinex_ms,
+            clahe_ms,
+            exposure_autogating_ms,
+            mode_rendering_ms,
+            total_ms,
+        };
+
+        (output, breakdown)
+    }
 }
+
