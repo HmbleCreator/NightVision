@@ -15,3 +15,7 @@ python/.pytest_cache/
 output/
 demo_results/
 
+# Agent skills local lock
+skills-lock.json
+
+
