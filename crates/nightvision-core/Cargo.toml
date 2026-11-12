@@ -4,7 +4,19 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Core algorithms and physics engine for digital night vision computational imaging"
+exclude = [
+    "/LowLightTestImages/*",
+    "/HighExposureImages/*",
+    "/output/*",
+    "/assets/*",
+    "/*.png",
+    "/*.jpg",
+    "/*.jpeg",
+]
 
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

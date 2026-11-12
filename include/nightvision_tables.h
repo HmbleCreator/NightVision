@@ -323,15 +323,27 @@ static const uint8_t NIGHTVISION_RECON_AMBER_B[256] = {
     0x5D, 0x5D, 0x5E, 0x5E, 0x5F, 0x5F, 0x5F, 0x60, 0x60, 0x61, 0x61, 0x61, 0x62, 0x62, 0x62, 0x63
 };
 
-/* ── Single-Cycle Fixed-Point Inlined Processing Macros ── */
+/* ── Single-Cycle Fixed-Point Inlined Processing Helpers & Macros ── */
+
+/**
+ * @brief Saturated uint8 clamping helper.
+ */
+static inline uint8_t nightvision_clamp_u8(int32_t val) {
+    return (uint8_t)(val < 0 ? 0 : (val > 255 ? 255 : val));
+}
 
 /**
  * @brief 1-cycle integer unsharp masking matching Desktop FPU acuity (1.25x detail boost).
  */
+static inline uint8_t nightvision_unsharp_mask_1_25x_u8(uint8_t orig, uint8_t blur) {
+    int32_t o = (int32_t)orig;
+    int32_t b = (int32_t)blur;
+    int32_t detail = o - b;
+    return nightvision_clamp_u8(o + detail + (detail >> 2));
+}
+
 #define NIGHTVISION_UNSHARP_MASK_1_25X(orig, blur) \
-    ((uint8_t)((int16_t)(orig) + ((int16_t)(orig) - (int16_t)(blur)) + (((int16_t)(orig) - (int16_t)(blur)) >> 2) < 0 ? 0 : \
-     (int16_t)(orig) + ((int16_t)(orig) - (int16_t)(blur)) + (((int16_t)(orig) - (int16_t)(blur)) >> 2) > 255 ? 255 : \
-     (uint8_t)((int16_t)(orig) + ((int16_t)(orig) - (int16_t)(blur)) + (((int16_t)(orig) - (int16_t)(blur)) >> 2))))
+    nightvision_unsharp_mask_1_25x_u8((uint8_t)(orig), (uint8_t)(blur))
 
 /**
  * @brief Fast integer square root using binary restoration (strictly O(1) cycles).

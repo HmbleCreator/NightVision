@@ -4,7 +4,19 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Embedded real-time NightVision ISP engine for microcontrollers (ESP32-S3, STM32H7, RP2040)"
+exclude = [
+    "/LowLightTestImages/*",
+    "/HighExposureImages/*",
+    "/output/*",
+    "/assets/*",
+    "/*.png",
+    "/*.jpg",
+    "/*.jpeg",
+]
 
 [dependencies]
 nightvision-core = { path = "../nightvision-core" }

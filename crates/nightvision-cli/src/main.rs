@@ -972,12 +972,20 @@ fn export_c_tables(output_path: &std::path::Path) -> Result<(), Box<dyn std::err
     content.push_str(&format_c_array("NIGHTVISION_RECON_AMBER_G", "Tactical Reconnaissance Amber - Green Channel", &amber.lut_g));
     content.push_str(&format_c_array("NIGHTVISION_RECON_AMBER_B", "Tactical Reconnaissance Amber - Blue Channel", &amber.lut_b));
 
-    content.push_str("/* ── Single-Cycle Fixed-Point Inlined Processing Macros ── */\n\n");
+    content.push_str("/* ── Single-Cycle Fixed-Point Inlined Processing Helpers & Macros ── */\n\n");
+    content.push_str("/**\n * @brief Saturated uint8 clamping helper.\n */\n");
+    content.push_str("static inline uint8_t nightvision_clamp_u8(int32_t val) {\n");
+    content.push_str("    return (uint8_t)(val < 0 ? 0 : (val > 255 ? 255 : val));\n");
+    content.push_str("}\n\n");
     content.push_str("/**\n * @brief 1-cycle integer unsharp masking matching Desktop FPU acuity (1.25x detail boost).\n */\n");
+    content.push_str("static inline uint8_t nightvision_unsharp_mask_1_25x_u8(uint8_t orig, uint8_t blur) {\n");
+    content.push_str("    int32_t o = (int32_t)orig;\n");
+    content.push_str("    int32_t b = (int32_t)blur;\n");
+    content.push_str("    int32_t detail = o - b;\n");
+    content.push_str("    return nightvision_clamp_u8(o + detail + (detail >> 2));\n");
+    content.push_str("}\n\n");
     content.push_str("#define NIGHTVISION_UNSHARP_MASK_1_25X(orig, blur) \\\n");
-    content.push_str("    ((uint8_t)((int16_t)(orig) + ((int16_t)(orig) - (int16_t)(blur)) + (((int16_t)(orig) - (int16_t)(blur)) >> 2) < 0 ? 0 : \\\n");
-    content.push_str("     (int16_t)(orig) + ((int16_t)(orig) - (int16_t)(blur)) + (((int16_t)(orig) - (int16_t)(blur)) >> 2) > 255 ? 255 : \\\n");
-    content.push_str("     (uint8_t)((int16_t)(orig) + ((int16_t)(orig) - (int16_t)(blur)) + (((int16_t)(orig) - (int16_t)(blur)) >> 2))))\n\n");
+    content.push_str("    nightvision_unsharp_mask_1_25x_u8((uint8_t)(orig), (uint8_t)(blur))\n\n");
 
     content.push_str("/**\n * @brief Fast integer square root using binary restoration (strictly O(1) cycles).\n */\n");
     content.push_str("static inline uint32_t nightvision_isqrt_u32(uint32_t val) {\n");

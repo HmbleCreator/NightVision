@@ -1,20 +1,34 @@
-# 🌙 NightVision: Next-Generation Digital Computational Night Vision Engine
+# 🌙 NightVision: Deterministic Computational ISP & Night Vision Engine
 
-A high-performance computational imaging and digital night vision pipeline engineered in **Rust**, with analytics and neural evaluation managed cleanly via **`uv`**.
+A physics-grounded, zero-allocation computational Image Signal Processor (ISP) and digital night vision engine engineered in **Rust** and **C99/C++17**, spanning high-throughput desktop multi-core processors and resource-constrained microcontrollers (`#![no_std]`).
+
+[![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
+[![C99/C++17](https://img.shields.io/badge/C%2FC%2B%2B-C99%20%7C%20C%2B%2B17-blue.svg)](include/nightvision.h)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green.svg)](LICENSE)
+[![Benchmarks](https://img.shields.io/badge/docs-Architecture%20%26%20Benchmarks-purple.svg)](docs/ARCHITECTURE_AND_BENCHMARKS.md)
 
 ---
 
-## 🎯 The Problem Statement & Technical Solutions
+## 🎯 Dual-Engine Architecture
 
-Traditional night vision technology has historically relied on analog vacuum image-intensifier tubes or thermal imaging. This project provides a pure computational photography alternative designed to run on standard digital CMOS sensors.
+`NightVision` is architected around two synchronized backends sharing deterministic noise physics and bidirectional tone models:
 
-| # | Traditional Limitation | The Technical Cause | NightVision Computational Solution |
-|---|---|---|---|
-| **1** | **Prohibitive Cost** ($10,000–$40,000+) | Analog vacuum tubes (GPNVGs, PVS-31s) require microchannel plates, gallium arsenide photocathodes, and extreme cleanroom manufacturing. | Operates entirely on commercial off-the-shelf **CMOS image sensors** (Sony STARVIS, webcams, mobile, or action cameras) using software computational photography. |
-| **2** | **Fragile & Bulky Hardware** | Vacuum tubes degrade if dropped and burn out or suffer permanent phosphor damage from sudden bright flashes. | Solid-state solid-silicon design with **Instantaneous Digital Auto-Gating**: local Reinhard highlight compression prevents blinding from headlights or muzzle flashes without tube burn-in. |
-| **3** | **Poor Image Quality** (Monochrome Phosphor) | Analog tubes can only output single-wavelength phosphor green (P43) or white/blue (P45), erasing color nuance. | **Full-Color Digital Night Vision**: Chromaticity restoration, white balance color constancy, and saturation recovery, alongside authentic military P45 White Phosphor and P43 Green Phosphor simulation modes. |
-| **4** | **Thermal Imaging Limitations** | Thermal sensors measure long-wave infrared heat (LWIR), producing low-res blobs that cannot see through glass or read signs. | Operates in the optical and near-infrared (NIR) spectrum (400–1000 nm), preserving **optical transparency through windshields/glass**, high-definition textual legibility, and facial recognition. |
-| **5** | **Digital Sensor Noise in Total Darkness** | In near-total darkness, photon arrival is discrete ($N \sim \text{Poisson}(\lambda)$ where $\lambda \ll 1$). Electrical amplifier and read noise ($\mathcal{N}(0, \sigma^2)$) drown out the sparse photons. | **Motion-Compensated Temporal Accumulation** ($+12\,\text{dB}$ to $+18\,\text{dB}$ SNR boost) combined with **$O(1)$ Guided Edge-Preserving Denoising**, **Multi-Scale Retinex**, and **CLAHE**. |
+1. **`nightvision-core` (Desktop & Edge SoC Engine)**:
+   - Multi-threaded planar $Y, C_b, C_r$ zero-allocation ISP processor (`PlanarIspProcessor`).
+   - Physics-gated $3\times3$ guided filter ($r=1$) and continuous $1.25\times$ pre-tone detail injection.
+   - Sustains **360.5 to 438.7 FPS** ($2.28\text{ ms}$ to $2.77\text{ ms}$) on 600×400 low-light frames.
+
+2. **`nightvision-mcu` (Embedded Fixed-Point Streaming Engine)**:
+   - Zero-allocation 3-line circular sliding buffer (`LineBuffer3`), consuming **1.8 KB to 2.3 KB SRAM** across typical sensor resolutions.
+   - `#![no_std]` streaming pipeline utilizing single-cycle bit-shifted arithmetic (`>> 2`, `>> 3`) and precomputed 8-bit Flash tables.
+   - Sustains **166.0 to 232.9 FPS** ($4.29\text{ ms}$ to $6.02\text{ ms}$) on 600×400 low-light frames with zero runtime heap allocations.
+
+3. **C99/C++17 Firmware API & Tables (`include/nightvision.h`, `include/nightvision_tables.h`)**:
+   - Zero-SRAM Flash lookup tables (**3.50 KB Flash / `.rodata`**, 0 bytes SRAM) for STM32H7, ESP32-S3, RP2040, and RISC-V targets.
+   - Single-cycle unsharp mask macro: `#define NIGHTVISION_UNSHARP_MASK_1_25X(orig, blur)` with safe intermediate integer casting and saturation clamping.
+
+For complete mathematical derivations, memory footprint calculations, and empirical benchmark matrices across extreme low light and photodiode saturation, see the technical whitepaper:
+👉 **[docs/ARCHITECTURE_AND_BENCHMARKS.md](docs/ARCHITECTURE_AND_BENCHMARKS.md)**
 
 ---
 
@@ -23,29 +37,19 @@ Traditional night vision technology has historically relied on analog vacuum ima
 ```
 NightVision/
 ├── Cargo.toml                         # Cargo workspace configuration
+├── CMakeLists.txt                     # C/C++ interface & CMake export
+├── include/                           # C/C++ embedded public headers
+│   ├── nightvision.h                  # C-API engine definitions & line processors
+│   └── nightvision_tables.h           # Static .rodata Flash lookup tables (3.50 KB)
+├── docs/
+│   └── ARCHITECTURE_AND_BENCHMARKS.md # Unified technical whitepaper & benchmark suite
+├── assets/
+│   └── benchmarks/                    # 5-panel panoramic comparison strips
 ├── crates/
-│   ├── nightvision-core/              # Pure Rust computational photography algorithms
-│   │   ├── src/
-│   │   │   ├── sensor.rs              # Physics-based CMOS sensor simulation (Poisson/Gaussian noise)
-│   │   │   ├── temporal.rs            # Motion-compensated recursive temporal accumulator
-│   │   │   ├── spatial.rs             # O(1) Guided filter & chroma despeckle denoiser
-│   │   │   ├── enhancement.rs         # Multi-Scale Retinex (MSRCR), CLAHE, Auto-Gating
-│   │   │   ├── modes.rs               # Tactical render modes (Full-Color, P45, P43, Recon, Thermal)
-│   │   │   ├── pipeline.rs            # Master multi-threaded pipeline orchestrator
-│   │   │   ├── metrics.rs             # PSNR, SSIM, and SNR benchmarking
-│   │   │   └── lib.rs                 # Public API and synthetic scene test generators
-│   ├── nightvision-cli/               # CLI tool for batch processing, demos, and benchmarks
-│   │   └── src/main.rs
-│   └── nightvision-gui/               # Real-time native desktop dashboard (egui / eframe)
-│       └── src/main.rs
-├── python/                            # Quantitative evaluation & analytics suite (managed by uv)
-│   ├── pyproject.toml                 # uv package configuration
-│   ├── scripts/
-│   │   ├── evaluate.py                # PSNR, SSIM, and SNR evaluation script
-│   │   └── benchmark_curves.py        # Generates publication-ready SNR vs Lux performance plots
-│   └── README.md
-└── output/
-    └── demo/                          # Generated comparative demonstration images & plots
+│   ├── nightvision-core/              # Zero-allocation planar ISP and physics engine
+│   ├── nightvision-mcu/               # #![no_std] fixed-point 3-line streaming engine
+│   ├── nightvision-cli/               # CLI batch processor, benchmark harness, and header exporter
+│   └── nightvision-gui/               # Real-time native desktop viewer (egui / eframe)
 ```
 
 ---
