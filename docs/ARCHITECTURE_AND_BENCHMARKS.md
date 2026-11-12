@@ -199,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut isp = PlanarIspProcessor::new(config);
 
     // 2. Load low-light or saturated input frame
-    let input_frame = image::open("LowLightTestImages/10.png")?.to_rgb8();
+    let input_frame = image::open("data/LowLightTestImages/10.png")?.to_rgb8();
 
     // 3. Process frame with sustained 360+ FPS throughput
     let enhanced_frame: RgbImage = isp.process_frame(&input_frame);

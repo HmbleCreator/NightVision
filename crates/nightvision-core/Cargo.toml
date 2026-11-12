@@ -9,6 +9,7 @@ keywords.workspace = true
 categories.workspace = true
 description = "Core algorithms and physics engine for digital night vision computational imaging"
 exclude = [
+    "/data/*",
     "/LowLightTestImages/*",
     "/HighExposureImages/*",
     "/output/*",

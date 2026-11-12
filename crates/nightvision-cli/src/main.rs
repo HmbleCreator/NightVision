@@ -92,7 +92,7 @@ enum Commands {
     /// Comprehensive evaluation and testing of real-world low-light images
     TestImages {
         /// Directory containing test images
-        #[arg(short, long, default_value = "LowLightTestImages")]
+        #[arg(short, long, default_value = "data/LowLightTestImages")]
         input_dir: PathBuf,
 
         /// Output directory for enhanced images and side-by-side comparisons
@@ -660,6 +660,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("║              NIGHTVISION REAL-WORLD LOW-LIGHT TEST BENCHMARK                   ║");
             println!("╚════════════════════════════════════════════════════════════════════════════════╝");
             println!();
+
+            let input_dir = if !input_dir.exists() && std::path::Path::new("LowLightTestImages").exists() {
+                PathBuf::from("LowLightTestImages")
+            } else {
+                input_dir
+            };
 
             fs::create_dir_all(&output_dir)?;
 
