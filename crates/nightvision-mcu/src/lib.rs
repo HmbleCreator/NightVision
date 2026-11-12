@@ -7,6 +7,8 @@
 //! - Deterministic Physics Noise Profiling: Evaluates Poisson-Gaussian noise envelopes without runtime variance calculation.
 
 pub mod deterministic_filter;
+pub mod dma;
+pub mod ffi;
 pub mod fixed_math;
 pub mod line_buffer;
 pub mod lut;
@@ -14,6 +16,7 @@ pub mod mcu_pipeline;
 pub mod optimization_engine;
 
 pub use deterministic_filter::{filter_line_deterministic, integer_unsharp_mask};
+pub use dma::{DmaBank, DmaPingPongBuffer};
 pub use fixed_math::{
     abs_diff_u8, ema_blend_deep_u8, ema_blend_motion_u8, ema_blend_static_u8, isqrt_u32, q8_mul,
 };
@@ -71,6 +74,75 @@ mod tests {
         let mut out2 = image::RgbImage::new(160, 120);
         dyn_engine.process_frame_into(&test_scene, &mut out2);
         assert_eq!(out2.dimensions(), (160, 120));
+    }
+
+    #[test]
+    fn test_dma_ping_pong_buffer() {
+        let mut dma_buf = DmaPingPongBuffer::<64>::new();
+
+        // 1. Fill Bank A via DMA
+        let rx_a = dma_buf.dma_rx_buffer_mut();
+        rx_a.fill(42);
+
+        // 2. Swap banks upon DMA Transfer Complete interrupt
+        dma_buf.swap_banks();
+
+        // 3. CPU ISP processes Bank A while DMA fills Bank B
+        assert_eq!(dma_buf.processing_buffer()[0], 42);
+
+        let rx_b = dma_buf.dma_rx_buffer_mut();
+        rx_b.fill(99);
+
+        dma_buf.swap_banks();
+        assert_eq!(dma_buf.processing_buffer()[0], 99);
+    }
+
+    #[test]
+    fn test_ffi_c_seam() {
+        use std::ffi::CStr;
+
+        let version = unsafe { CStr::from_ptr(ffi::nightvision_version()) };
+        assert!(version.to_str().unwrap().contains("NightVision Embedded"));
+
+        unsafe {
+            let handle = ffi::nightvision_create(320, 240, 1);
+            assert!(!handle.is_null());
+
+            ffi::nightvision_set_display_mode(handle, 2);
+            ffi::nightvision_reset(handle);
+
+            let in_bytes = vec![20u8; 320 * 240 * 3];
+            let mut out_bytes = vec![0u8; 320 * 240 * 3];
+
+            let res = ffi::nightvision_process_frame(
+                handle,
+                320,
+                240,
+                in_bytes.as_ptr(),
+                out_bytes.as_mut_ptr(),
+            );
+            assert_eq!(res, 0);
+            assert!(out_bytes[0] > 0);
+
+            // Test line streaming C-FFI
+            let top = [10u8; 64];
+            let mid = [12u8; 64];
+            let bot = [11u8; 64];
+            let mut out_line = [0u8; 64];
+
+            let line_res = ffi::nightvision_process_line_luma(
+                top.as_ptr(),
+                mid.as_ptr(),
+                bot.as_ptr(),
+                out_line.as_mut_ptr(),
+                64,
+                std::ptr::null(),
+                std::ptr::null(),
+            );
+            assert_eq!(line_res, 0);
+
+            ffi::nightvision_destroy(handle);
+        }
     }
 }
 

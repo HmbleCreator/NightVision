@@ -65,6 +65,8 @@ pub struct McuNightVisionEngine<const WIDTH: usize, const HEIGHT: usize> {
     /// Pre-allocated scratch row for spatial filter output
     scratch_row: [u8; WIDTH],
     frame_count: usize,
+    smoothed_luma: f32,
+    applied_knee_luma: f32,
 }
 
 impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT> {
@@ -75,6 +77,8 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
             temporal_luma_buffer: vec![0u8; WIDTH * HEIGHT],
             scratch_row: [0u8; WIDTH],
             frame_count: 0,
+            smoothed_luma: 16.0,
+            applied_knee_luma: 16.0,
         }
     }
 
@@ -83,12 +87,46 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
         self.line_buffer.reset();
         self.temporal_luma_buffer.fill(0);
         self.frame_count = 0;
+        self.smoothed_luma = 16.0;
+        self.applied_knee_luma = 16.0;
     }
 
     /// Process a complete video frame using the MCU streaming line-buffered pipeline.
     pub fn process_frame_streaming(&mut self, input_frame: &RgbImage) -> RgbImage {
         let mut output_frame = ImageBuffer::new(WIDTH as u32, HEIGHT as u32);
         self.line_buffer.reset();
+
+        // Auto-exposure scene luminance tracking with 16-frame EMA smoothing and deadband hysteresis
+        if self.config.enable_adaptive_knee && (WIDTH * HEIGHT) > 0 {
+            let mut sample_sum = 0u64;
+            let step = ((WIDTH * HEIGHT) / 512).max(1);
+            let mut samples = 0u64;
+            for i in (0..(WIDTH * HEIGHT)).step_by(step) {
+                let x = (i % WIDTH) as u32;
+                let y = (i / WIDTH) as u32;
+                let p = input_frame.get_pixel(x, y);
+                let y_val = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8) as u64;
+                sample_sum += y_val;
+                samples += 1;
+            }
+            let current_mean = (sample_sum as f32) / (samples as f32).max(1.0);
+
+            let smoothed = if self.frame_count == 0 {
+                current_mean
+            } else {
+                (current_mean + 15.0 * self.smoothed_luma) / 16.0
+            };
+            self.smoothed_luma = smoothed;
+
+            if self.frame_count == 0 || (smoothed - self.applied_knee_luma).abs() >= 0.5 {
+                self.applied_knee_luma = smoothed;
+                if smoothed < 8.0 {
+                    self.config.autogating_lut = AutoGatingLut::new_with_knee(2.8, 0.60, 0.88, smoothed);
+                } else {
+                    self.config.autogating_lut = AutoGatingLut::new(2.8, 0.60, 0.88);
+                }
+            }
+        }
 
         let motion_thresh = self.config.motion_threshold_adu;
 
@@ -231,6 +269,8 @@ pub struct McuDynamicProcessor {
     width: usize,
     height: usize,
     frame_count: usize,
+    smoothed_luma: f32,
+    applied_knee_luma: f32,
 }
 
 impl McuDynamicProcessor {
@@ -243,6 +283,8 @@ impl McuDynamicProcessor {
             width: 0,
             height: 0,
             frame_count: 0,
+            smoothed_luma: 16.0,
+            applied_knee_luma: 16.0,
         }
     }
 
@@ -251,6 +293,8 @@ impl McuDynamicProcessor {
         self.line_buffer.fill(0);
         self.scratch_row.fill(0);
         self.frame_count = 0;
+        self.smoothed_luma = 16.0;
+        self.applied_knee_luma = 16.0;
     }
 }
 
@@ -266,14 +310,16 @@ impl FrameProcessor for McuDynamicProcessor {
             self.line_buffer = vec![0u8; w * 3];
             self.scratch_row = vec![0u8; w];
             self.frame_count = 0;
+            self.smoothed_luma = 16.0;
+            self.applied_knee_luma = 16.0;
         }
 
         if output.dimensions() != (w_u32, h_u32) {
             *output = ImageBuffer::new(w_u32, h_u32);
         }
 
-        // Adaptive shadow-knee tuning for ultra-dark scenes (< 8.0 ADU)
-        if self.config.enable_adaptive_knee && self.frame_count == 0 && (w * h) > 0 {
+        // Auto-exposure scene luminance tracking with 16-frame EMA smoothing and deadband hysteresis
+        if self.config.enable_adaptive_knee && (w * h) > 0 {
             let mut sample_sum = 0u64;
             let step = ((w * h) / 512).max(1);
             let mut samples = 0u64;
@@ -285,9 +331,22 @@ impl FrameProcessor for McuDynamicProcessor {
                 sample_sum += y_val;
                 samples += 1;
             }
-            let mean = (sample_sum as f32) / (samples as f32).max(1.0);
-            if mean < 8.0 {
-                self.config.autogating_lut = AutoGatingLut::new_with_knee(2.8, 0.60, 0.88, mean);
+            let current_mean = (sample_sum as f32) / (samples as f32).max(1.0);
+
+            let smoothed = if self.frame_count == 0 {
+                current_mean
+            } else {
+                (current_mean + 15.0 * self.smoothed_luma) / 16.0
+            };
+            self.smoothed_luma = smoothed;
+
+            if self.frame_count == 0 || (smoothed - self.applied_knee_luma).abs() >= 0.5 {
+                self.applied_knee_luma = smoothed;
+                if smoothed < 8.0 {
+                    self.config.autogating_lut = AutoGatingLut::new_with_knee(2.8, 0.60, 0.88, smoothed);
+                } else {
+                    self.config.autogating_lut = AutoGatingLut::new(2.8, 0.60, 0.88);
+                }
             }
         }
 
