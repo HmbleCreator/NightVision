@@ -282,7 +282,9 @@ impl ImageSignalProcessor {
         );
 
         // Apply high-fidelity structural unsharp mask to y_plane:
-        // Y_sharp = Denoised + 0.5 * (Original - Denoised)
+        // Detail is extracted against the physics-denoised base and injected directly
+        // into the luminance plane before the non-linear tone curve:
+        // Y_sharp = Original + 1.25 * (Original - Denoised)
         let y_plane = &mut self.y_plane;
         let denoised_y = &self.scratch_a;
 
@@ -291,7 +293,7 @@ impl ImageSignalProcessor {
             .zip(denoised_y.par_iter())
             .for_each(|(orig, &denoised)| {
                 let detail = *orig - denoised;
-                *orig = (denoised + 0.50 * detail).clamp(0.0, 1.0);
+                *orig = (*orig + 1.25 * detail).clamp(0.0, 1.0);
             });
 
         // Chroma noise reduction (smoothing Cb and Cr guided by Y)
@@ -451,7 +453,16 @@ impl ImageSignalProcessor {
                 let row_offset = py * w;
                 for px in 0..w {
                     let idx = row_offset + px;
-                    let luma = y_plane[idx];
+                    let raw_luma = y_plane[idx];
+
+                    // Black-toe anchor: suppress sensor noise floor (< 3.0 ADU) quadratically to 0.0
+                    // Ensures deep shadows strictly reach 0 ADU (desktop_min == 0) without milky gray bias.
+                    let luma = if raw_luma < (3.0 / 255.0) {
+                        let t = raw_luma / (3.0 / 255.0);
+                        raw_luma * t
+                    } else {
+                        raw_luma
+                    };
 
                     // Bidirectional Transfer Function:
                     let comp = if is_ultra_dark {
@@ -484,18 +495,24 @@ impl ImageSignalProcessor {
 
                     // Bidirectional Dual Chroma Gate:
                     // 1. Lower gate for dark shadows (Y < 15 ADU) to prevent blue/magenta noise blotches
-                    let lower_chroma_gate = (luma / (15.0 / 255.0)).clamp(0.0, 1.0);
+                    let lower_chroma_gate = (raw_luma / (15.0 / 255.0)).clamp(0.0, 1.0);
                     // 2. Upper gate for extreme highlights (Y > 230 ADU) to prevent false magenta/cyan clipping
-                    let upper_chroma_gate = ((1.0 - luma) / (25.0 / 255.0)).clamp(0.0, 1.0);
+                    let upper_chroma_gate = ((1.0 - raw_luma) / (25.0 / 255.0)).clamp(0.0, 1.0);
                     let chroma_gate = lower_chroma_gate * upper_chroma_gate;
+
+                    // Proportional chrominance scaling:
+                    // Scales chroma proportionally to the luminance boost (Y_enhanced / Y_raw)
+                    // so that boosted scenes do not become washed out or greyish.
+                    let luma_boost = comp / raw_luma.max(0.02);
+                    let chroma_gain = luma_boost.clamp(1.0, 4.5) * chroma_gate * sat_boost;
 
                     let (r, g, b) = match mode {
                         DisplayMode::FullColor => {
-                            let cb0 = (cb_plane[idx] - 0.5) * chroma_gate;
-                            let cr0 = (cr_plane[idx] - 0.5) * chroma_gate;
-                            let r_f = comp + 1.402 * cr0 * sat_boost;
-                            let g_f = comp - 0.344136 * cb0 * sat_boost - 0.714136 * cr0 * sat_boost;
-                            let b_f = comp + 1.772 * cb0 * sat_boost;
+                            let cb0 = (cb_plane[idx] - 0.5) * chroma_gain;
+                            let cr0 = (cr_plane[idx] - 0.5) * chroma_gain;
+                            let r_f = comp + 1.402 * cr0;
+                            let g_f = comp - 0.344136 * cb0 - 0.714136 * cr0;
+                            let b_f = comp + 1.772 * cb0;
                             (
                                 (r_f.clamp(0.0, 1.0) * 255.0).round() as u8,
                                 (g_f.clamp(0.0, 1.0) * 255.0).round() as u8,

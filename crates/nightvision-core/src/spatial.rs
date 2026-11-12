@@ -27,9 +27,9 @@ pub struct SpatialDenoiseConfig {
 impl Default for SpatialDenoiseConfig {
     fn default() -> Self {
         Self {
-            guided_radius: 3,
+            guided_radius: 1,
             guided_epsilon: 0.015,
-            chroma_denoise_strength: 0.85,
+            chroma_denoise_strength: 0.0,
             iterations: 1,
         }
     }
