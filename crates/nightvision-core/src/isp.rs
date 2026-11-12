@@ -419,20 +419,6 @@ impl ImageSignalProcessor {
             1.0
         };
 
-        // 3. Fast parallel peak detection for flare auto-gating
-        let max_luma = self
-            .y_plane
-            .par_chunks_exact(w)
-            .map(|row| row.iter().copied().fold(0.0f32, f32::max))
-            .reduce(|| 0.0f32, f32::max);
-
-        let flare_attenuation = if max_luma > autogate_threshold {
-            1.0 / (1.0 + (max_luma - autogate_threshold) * 8.0)
-        } else {
-            1.0
-        };
-
-        let effective_gain = exposure_gain * flare_attenuation;
         let gamma_exp = if gamma > 0.0 && gamma < 1.0 {
             gamma
         } else {
@@ -443,7 +429,7 @@ impl ImageSignalProcessor {
         let cb_plane = &self.cb_plane;
         let cr_plane = &self.cr_plane;
 
-        // 4. Fused bidirectional tone curve, dual chroma gate, and display mode rendering
+        // 3. Fused bidirectional tone curve, dual chroma gate, and display mode rendering
         output
             .as_flat_samples_mut()
             .samples
@@ -474,9 +460,15 @@ impl ImageSignalProcessor {
                         } else {
                             1.0
                         };
-                        let boosted = luma * effective_gain * knee_mult;
+                        let boosted = luma * exposure_gain * knee_mult;
                         let lifted = boosted.powf(gamma_exp);
-                        (lifted / (1.0 + lifted * 0.4)).clamp(0.0, 1.0)
+                        let comp_base = if raw_luma > autogate_threshold {
+                            let flare_damping = 1.0 / (1.0 + (raw_luma - autogate_threshold) * 6.0);
+                            (lifted * flare_damping) / (1.0 + lifted * 0.4)
+                        } else {
+                            lifted / (1.0 + lifted * 0.4)
+                        };
+                        comp_base.clamp(0.0, 1.0)
                     } else if is_high_exposure {
                         // High exposure concave highlight-compression shoulder:
                         // Pulls down upper midtones (140..254 ADU) to expand highlight contrast
@@ -489,9 +481,15 @@ impl ImageSignalProcessor {
                             (shoulder_start + (1.0 - shoulder_start) * t.powf(2.2)).clamp(0.0, 1.0)
                         }
                     } else {
-                        let boosted = luma * effective_gain;
+                        let boosted = luma * exposure_gain;
                         let lifted = boosted.powf(gamma_exp);
-                        (lifted / (1.0 + lifted * 0.35)).clamp(0.0, 1.0)
+                        let comp_base = if raw_luma > autogate_threshold {
+                            let flare_damping = 1.0 / (1.0 + (raw_luma - autogate_threshold) * 6.0);
+                            (lifted * flare_damping) / (1.0 + lifted * 0.35)
+                        } else {
+                            lifted / (1.0 + lifted * 0.35)
+                        };
+                        comp_base.clamp(0.0, 1.0)
                     };
 
                     // Bidirectional Dual Chroma Gate:
