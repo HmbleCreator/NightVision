@@ -167,16 +167,21 @@ Each panorama displays 5 synchronized panels from left to right:
 
 ---
 
-### 2. High-Exposure & Mixed-Illumination Suite (4 Scenes)
+### 2. High-Exposure & Mixed-Illumination Suite (5 Scenes)
 
-Evaluated across extreme photodiode well saturation ($255\text{ ADU}$), localized glare flare, and real-world screen capture:
+Evaluated across extreme photodiode well saturation ($255\text{ ADU}$), localized glare flare, daylight window blowout, and real-world screen capture:
 
 | Image File | Optical Regime | Native Resolution | Raw Luma [Range] | Desktop FPU (FPS / ms) | MCU Stream (FPS / ms) | Desk / MCU Lap. Var | PSNR / SSIM | AEC Regime & Rec. EV |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `High10.jpeg` | 100% Saturation Ceiling | 960×1280 | 255.0 [255..255] | **73.9 FPS (13.5 ms)** | **53.8 FPS (18.6 ms)** | 0.0 / 0.0 | **100.0 dB / 1.0000** | `FullSaturation` (-7.0 EV) |
+| `Room_Window_Overexposed.jpg` | Severe Window Flare & Washout | 768×1024 | 251.2 [181..255] | **76.8 FPS (13.0 ms)** | **54.9 FPS (18.2 ms)** | 167.3 / 169.3 | **42.35 dB / 0.9983** | `FullSaturation` (-6.7 EV) |
 | `High_Glare_Bloom.png` | Diffuse Outdoor Glare | 640×480 | 214.4 [65..255] | **321.2 FPS (3.11 ms)** | **194.4 FPS (5.14 ms)** | 1523.9 / 1209.1 | **28.84 dB / 0.9982** | `HighExposure` (-1.0 EV) |
 | `High_Overexposed_Toys.png`| Direct Spotlight Wash | 600×400 | 224.8 [80..255] | **423.1 FPS (2.36 ms)** | **223.3 FPS (4.48 ms)** | 6563.3 / 5702.5 | **26.49 dB / 0.9953** | `FullSaturation` (-5.7 EV) |
 | `VivoBook_Screen.jpg` | Mixed Screen & Dark Keyboard | 768×1024 | 64.8 [0..254] | **128.8 FPS (7.76 ms)** | **75.7 FPS (13.21 ms)** | 2504.4 / 1819.7 | **28.39 dB / 0.9931** | `NormalDaylight` (+0.7 EV) |
+
+#### Severe Backlit Window Flare & Foreground Washout (`Room_Window_Overexposed.jpg`)
+*Recovers washed-out foreground from 91.6% saturation, expanding dynamic range by +52.7% and sharpening edges by +846% (Laplacian Var 17.7 → 169.3).*
+![Room Window Overexposed Comparison](assets/benchmarks/Room_Window_Overexposed_comparison.png)
 
 #### Real-World Screen & Keyboard Capture (`VivoBook_Screen.jpg`)
 *Lifts dark keyboard shadows while preserving bright text on the emissive screen (+88.5% edge definition).*
