@@ -97,7 +97,7 @@ Implements an $O(1)$ box-filtered **Guided Image Filter** (He et al.) that smoot
 Simulates raw CMOS capture in starlight and quarter-moon, runs temporal accumulation, renders all tactical modes, and generates side-by-side comparison images:
 
 ```bash
-cargo run --release -p nightvision-cli -- demo --resolution 640x480 --frames 12
+cargo run --release --example demo -- --resolution 640x480 --frames 12
 ```
 
 The output images will be stored in `output/demo/`:

@@ -8,9 +8,13 @@
 //! - Analog & digital gain amplification (ISO)
 //! - Quantization and dynamic range saturation
 
+#[cfg(feature = "synthetic-sim")]
 use image::{ImageBuffer, Rgb, RgbImage};
+#[cfg(feature = "synthetic-sim")]
 use rand::distributions::Distribution;
+#[cfg(feature = "synthetic-sim")]
 use rand::thread_rng;
+#[cfg(feature = "synthetic-sim")]
 use rand_distr::{Normal, Poisson};
 use serde::{Deserialize, Serialize};
 
@@ -102,12 +106,14 @@ pub struct SensorSimulationStats {
     pub digital_gain_applied: f64,
 }
 
-/// Physical CMOS Sensor Simulator.
+/// Physical CMOS Sensor Simulator (active with synthetic-sim feature).
+#[cfg(feature = "synthetic-sim")]
 #[derive(Debug, Clone)]
 pub struct CmosSensorSimulator {
     pub config: CmosSensorConfig,
 }
 
+#[cfg(feature = "synthetic-sim")]
 impl CmosSensorSimulator {
     pub fn new(config: CmosSensorConfig) -> Self {
         Self { config }

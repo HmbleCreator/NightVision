@@ -19,6 +19,9 @@ exclude = [
     "/*.jpeg",
 ]
 
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
 [dependencies]
 nightvision-core = { path = "../nightvision-core", version = "0.1.0" }
 image = { version = "0.25", default-features = false, features = ["png"] }

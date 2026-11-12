@@ -19,11 +19,19 @@ exclude = [
     "/*.jpeg",
 ]
 
+[features]
+default = ["synthetic-sim"]
+synthetic-sim = ["dep:rand", "dep:rand_distr"]
+
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rayon = "1.10"
-rand = "0.8"
-rand_distr = "0.4"
+rand = { version = "0.8", optional = true }
+rand_distr = { version = "0.4", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[dev-dependencies]
+clap = { version = "4.5", features = ["derive"] }
+indicatif = "0.17"
 

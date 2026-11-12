@@ -24,17 +24,21 @@ pub use metrics::{calculate_psnr, calculate_snr_db, calculate_ssim};
 pub use modes::{render_mode, DisplayMode};
 pub use pipeline::{NightVisionPipeline, PipelineConfig, StageBreakdown};
 pub use processor::FrameProcessor;
+#[cfg(feature = "synthetic-sim")]
+pub use sensor::CmosSensorSimulator;
 pub use sensor::{
-    CmosSensorConfig, CmosSensorSimulator, ExposureMeteringReport, LuxLevel, SceneLightingRegime,
+    CmosSensorConfig, ExposureMeteringReport, LuxLevel, SceneLightingRegime,
     SensorSimulationStats,
 };
 pub use spatial::{denoise_image, SpatialDenoiseConfig};
 pub use temporal::{AdaptiveTemporalAccumulator, TemporalConfig};
 
+#[cfg(any(test, feature = "synthetic-sim"))]
 use image::{ImageBuffer, Rgb, RgbImage};
 
 /// Generates a synthetic test chart containing fine resolution bars, text patterns,
 /// and color checker blocks for ground-truth benchmarking without external assets.
+#[cfg(any(test, feature = "synthetic-sim"))]
 pub fn generate_synthetic_test_scene(width: u32, height: u32) -> RgbImage {
     let mut img = ImageBuffer::new(width, height);
 
