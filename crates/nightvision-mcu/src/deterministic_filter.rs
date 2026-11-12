@@ -71,15 +71,26 @@ pub fn filter_line_deterministic<const WIDTH: usize>(
 }
 
 /// Lightweight single-scale integer unsharp mask for local contrast enhancement.
-/// Replaces heavy multi-scale Retinex with 2 bit-shifts and 1 subtraction per pixel.
+/// Matches the continuous 1.25x high-frequency detail injection law of the Desktop ISP:
+///   Y_sharp = orig + 1.25 * (orig - blur) = orig + detail + (detail >> 2)
+/// Replaces heavy multi-scale Retinex with 2 bit-shifts and additions per pixel (1 clock cycle).
 #[inline(always)]
 pub fn integer_unsharp_mask(original: u8, blurred: u8, boost_shift: u8) -> u8 {
     let orig = original as i16;
     let blur = blurred as i16;
     let detail = orig - blur;
 
-    // detail * (1 + 1/2) or boost using bitshift
-    let boosted = orig + (detail >> boost_shift);
+    // Fixed-point unsharp detail amplification:
+    // When boost_shift == 1: 1.25x boost (detail + (detail >> 2)), matching Desktop FPU acuity.
+    // When boost_shift == 0: 2.0x boost (detail << 1).
+    // Otherwise fallback to classic attenuation: (detail >> boost_shift).
+    let boosted = if boost_shift == 1 {
+        orig + detail + (detail >> 2)
+    } else if boost_shift == 0 {
+        orig + (detail << 1)
+    } else {
+        orig + (detail >> boost_shift)
+    };
     boosted.clamp(0, 255) as u8
 }
 

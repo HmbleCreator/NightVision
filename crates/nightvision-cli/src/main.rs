@@ -103,6 +103,13 @@ enum Commands {
         #[arg(long, default_value_t = 10)]
         benchmark_iterations: usize,
     },
+
+    /// Export C/C++ static flash look-up tables (LUTs) and inline macros for embedded MCU targets
+    ExportHeader {
+        /// Destination path for generated C/C++ header file
+        #[arg(short, long, default_value = "include/nightvision_tables.h")]
+        output: PathBuf,
+    },
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
@@ -848,7 +855,147 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fs::write(&json_path, serde_json::to_string_pretty(&results)?)?;
             println!("Saved complete quantitative metrics report to: {}", json_path.display());
         }
+
+        Commands::ExportHeader { output } => {
+            println!("╔════════════════════════════════════════════════════════════════╗");
+            println!("║          NIGHTVISION C/C++ HARDWARE TABLES EXPORT              ║");
+            println!("╚════════════════════════════════════════════════════════════════╝");
+            println!();
+            println!("Generating static flash look-up tables (LUTs) for embedded deployment...");
+            export_c_tables(&output)?;
+            println!("✓ Successfully generated zero-RAM embedded header: {}", output.display());
+        }
     }
 
+    Ok(())
+}
+
+fn format_c_array(name: &str, comment: &str, data: &[u8]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("/** {}\n * Size: {} bytes\n */\n", comment, data.len()));
+    out.push_str(&format!("static const uint8_t {}[{}] = {{\n    ", name, data.len()));
+    for (i, &byte) in data.iter().enumerate() {
+        out.push_str(&format!("0x{:02X}", byte));
+        if i + 1 < data.len() {
+            out.push_str(", ");
+            if (i + 1) % 16 == 0 {
+                out.push_str("\n    ");
+            }
+        }
+    }
+    out.push_str("\n};\n\n");
+    out
+}
+
+fn export_c_tables(output_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    use nightvision_mcu::{AutoGatingLut, DeterministicNoiseLut, PhosphorLut};
+    use std::io::Write;
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let noise_lut = DeterministicNoiseLut::new(2.8, 0.85, 2.1);
+    let ultradark_lut = AutoGatingLut::new_bidirectional(2.8, 0.60, 0.88, 5.0, 40.0, 0.0);
+    let lowlight_lut = AutoGatingLut::new_bidirectional(2.8, 0.60, 0.88, 16.0, 64.0, 0.0);
+    let highexposure_lut = AutoGatingLut::new_bidirectional(2.8, 0.60, 0.88, 200.0, 240.0, 0.0);
+    let p45 = PhosphorLut::p45_white();
+    let p43 = PhosphorLut::p43_green();
+    let amber = PhosphorLut::recon_amber();
+
+    // Dual chroma gate table (256 bytes)
+    let mut chroma_gate_lut = [0u8; 256];
+    for i in 0..256 {
+        let raw_u8 = i as u8;
+        let atten: u32 = if raw_u8 < 16 {
+            (raw_u8 as u32) * 16
+        } else if raw_u8 > 230 {
+            ((255 - raw_u8 as u32) * 10).min(256)
+        } else {
+            256
+        };
+        chroma_gate_lut[i] = (atten.min(255)) as u8;
+    }
+
+    let mut content = String::new();
+    content.push_str("/**\n");
+    content.push_str(" * @file nightvision_tables.h\n");
+    content.push_str(" * @brief Precomputed Hardware Look-Up Tables (LUTs) for Embedded NightVision ISP.\n");
+    content.push_str(" * Generated automatically from nightvision-mcu physics model.\n");
+    content.push_str(" * Target: STM32H7, ESP32-S3, RP2040, or bare-metal Cortex-M4/M7.\n");
+    content.push_str(" * Memory footprint: Stored entirely in Flash (0 bytes SRAM overhead).\n");
+    content.push_str(" */\n\n");
+    content.push_str("#ifndef NIGHTVISION_TABLES_H\n");
+    content.push_str("#define NIGHTVISION_TABLES_H\n\n");
+    content.push_str("#include <stdint.h>\n\n");
+    content.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
+
+    content.push_str(&format_c_array(
+        "NIGHTVISION_NOISE_LUT",
+        "Deterministic Poisson Noise Threshold: tau(Y) = k * sqrt(alpha * Y + sigma_read^2)",
+        &noise_lut.threshold_table,
+    ));
+
+    content.push_str(&format_c_array(
+        "NIGHTVISION_LUT_ULTRA_DARK",
+        "Bidirectional Ultra-Dark Transfer LUT (< 8.0 ADU) with Hermite shadow knee",
+        &ultradark_lut.table,
+    ));
+
+    content.push_str(&format_c_array(
+        "NIGHTVISION_LUT_LOW_LIGHT",
+        "Standard Low-Light Reinhard Auto-Gating Transfer LUT (8.0 to 170.0 ADU)",
+        &lowlight_lut.table,
+    ));
+
+    content.push_str(&format_c_array(
+        "NIGHTVISION_LUT_HIGH_EXPOSURE",
+        "Bidirectional High-Exposure Concave Highlight Compression LUT (anchored at f(255)=255)",
+        &highexposure_lut.table,
+    ));
+
+    content.push_str(&format_c_array(
+        "NIGHTVISION_CHROMA_GATE",
+        "Dual Chroma Gate (Shadow Noise Roll-off < 16 ADU & Highlight Anti-Magenta > 230 ADU)",
+        &chroma_gate_lut,
+    ));
+
+    content.push_str(&format_c_array("NIGHTVISION_P45_WHITE_R", "P45 Tactical White Phosphor - Red Channel", &p45.lut_r));
+    content.push_str(&format_c_array("NIGHTVISION_P45_WHITE_G", "P45 Tactical White Phosphor - Green Channel", &p45.lut_g));
+    content.push_str(&format_c_array("NIGHTVISION_P45_WHITE_B", "P45 Tactical White Phosphor - Blue Channel", &p45.lut_b));
+
+    content.push_str(&format_c_array("NIGHTVISION_P43_GREEN_R", "P43 Military Green Phosphor (545nm) - Red Channel", &p43.lut_r));
+    content.push_str(&format_c_array("NIGHTVISION_P43_GREEN_G", "P43 Military Green Phosphor (545nm) - Green Channel", &p43.lut_g));
+    content.push_str(&format_c_array("NIGHTVISION_P43_GREEN_B", "P43 Military Green Phosphor (545nm) - Blue Channel", &p43.lut_b));
+
+    content.push_str(&format_c_array("NIGHTVISION_RECON_AMBER_R", "Tactical Reconnaissance Amber - Red Channel", &amber.lut_r));
+    content.push_str(&format_c_array("NIGHTVISION_RECON_AMBER_G", "Tactical Reconnaissance Amber - Green Channel", &amber.lut_g));
+    content.push_str(&format_c_array("NIGHTVISION_RECON_AMBER_B", "Tactical Reconnaissance Amber - Blue Channel", &amber.lut_b));
+
+    content.push_str("/* ── Single-Cycle Fixed-Point Inlined Processing Macros ── */\n\n");
+    content.push_str("/**\n * @brief 1-cycle integer unsharp masking matching Desktop FPU acuity (1.25x detail boost).\n */\n");
+    content.push_str("#define NIGHTVISION_UNSHARP_MASK_1_25X(orig, blur) \\\n");
+    content.push_str("    ((uint8_t)((int16_t)(orig) + ((int16_t)(orig) - (int16_t)(blur)) + (((int16_t)(orig) - (int16_t)(blur)) >> 2) < 0 ? 0 : \\\n");
+    content.push_str("     (int16_t)(orig) + ((int16_t)(orig) - (int16_t)(blur)) + (((int16_t)(orig) - (int16_t)(blur)) >> 2) > 255 ? 255 : \\\n");
+    content.push_str("     (uint8_t)((int16_t)(orig) + ((int16_t)(orig) - (int16_t)(blur)) + (((int16_t)(orig) - (int16_t)(blur)) >> 2))))\n\n");
+
+    content.push_str("/**\n * @brief Fast integer square root using binary restoration (strictly O(1) cycles).\n */\n");
+    content.push_str("static inline uint32_t nightvision_isqrt_u32(uint32_t val) {\n");
+    content.push_str("    uint32_t res = 0;\n");
+    content.push_str("    uint32_t bit = 1u << 30;\n");
+    content.push_str("    while (bit > val) { bit >>= 2; }\n");
+    content.push_str("    while (bit != 0) {\n");
+    content.push_str("        if (val >= res + bit) { val -= res + bit; res = (res >> 1) + bit; }\n");
+    content.push_str("        else { res >>= 1; }\n");
+    content.push_str("        bit >>= 2;\n");
+    content.push_str("    }\n");
+    content.push_str("    return res;\n");
+    content.push_str("}\n\n");
+
+    content.push_str("#ifdef __cplusplus\n}\n#endif\n\n");
+    content.push_str("#endif /* NIGHTVISION_TABLES_H */\n");
+
+    let mut file = std::fs::File::create(output_path)?;
+    file.write_all(content.as_bytes())?;
     Ok(())
 }

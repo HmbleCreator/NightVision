@@ -241,7 +241,13 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
             filter_line_deterministic(top, mid, mid, &mut self.scratch_row, &self.config.noise_lut);
 
             for x in 0..WIDTH {
-                let tone_mapped = self.config.autogating_lut.lookup(self.scratch_row[x]);
+                let filtered = self.scratch_row[x];
+                let contrast = if self.config.enable_unsharp_boost {
+                    integer_unsharp_mask(mid[x], filtered, 1)
+                } else {
+                    filtered
+                };
+                let tone_mapped = self.config.autogating_lut.lookup(contrast);
                 let rgb = if self.config.display_mode == DisplayMode::FullColor {
                     let p = input_frame.get_pixel(x as u32, last_y);
                     let raw_y = (mid[x] as u32).max(1);
@@ -547,7 +553,13 @@ impl FrameProcessor for McuDynamicProcessor {
             filter_line_deterministic_slice(top, mid, mid, &mut self.scratch_row, &self.config.noise_lut);
 
             for x in 0..w {
-                let tone_mapped = self.config.autogating_lut.lookup(self.scratch_row[x]);
+                let filtered = self.scratch_row[x];
+                let contrast = if self.config.enable_unsharp_boost {
+                    integer_unsharp_mask(mid[x], filtered, 1)
+                } else {
+                    filtered
+                };
+                let tone_mapped = self.config.autogating_lut.lookup(contrast);
                 let rgb = if self.config.display_mode == DisplayMode::FullColor {
                     let p = input.get_pixel(x as u32, last_y);
                     let raw_y = (mid[x] as u32).max(1);

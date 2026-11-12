@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "nightvision_tables.h"
 
 #ifdef __cplusplus
 extern "C" {
