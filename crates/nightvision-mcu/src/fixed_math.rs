@@ -84,3 +84,4 @@ pub fn clamp_to_u8(val: i32) -> u8 {
         val as u8
     }
 }
+

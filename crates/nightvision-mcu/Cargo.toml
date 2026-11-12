@@ -9,3 +9,4 @@ description = "Embedded real-time NightVision ISP engine for microcontrollers (E
 [dependencies]
 nightvision-core = { path = "../nightvision-core" }
 image = { version = "0.25", default-features = false, features = ["png"] }
+

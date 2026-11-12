@@ -12,6 +12,7 @@ pub mod enhancement;
 pub mod metrics;
 pub mod modes;
 pub mod pipeline;
+pub mod processor;
 pub mod sensor;
 pub mod spatial;
 pub mod temporal;
@@ -20,6 +21,7 @@ pub use enhancement::{apply_clahe, apply_exposure_and_autogating, apply_retinex,
 pub use metrics::{calculate_psnr, calculate_snr_db, calculate_ssim};
 pub use modes::{render_mode, DisplayMode};
 pub use pipeline::{NightVisionPipeline, PipelineConfig, StageBreakdown};
+pub use processor::FrameProcessor;
 pub use sensor::{CmosSensorConfig, CmosSensorSimulator, LuxLevel, SensorSimulationStats};
 pub use spatial::{denoise_image, SpatialDenoiseConfig};
 pub use temporal::{AdaptiveTemporalAccumulator, TemporalConfig};
@@ -110,5 +112,25 @@ mod tests {
         let psnr_noisy = calculate_psnr(&test_scene, &noisy_frame);
         let psnr_enhanced = calculate_psnr(&test_scene, &enhanced);
         println!("PSNR Noisy: {:.2} dB, Enhanced: {:.2} dB", psnr_noisy, psnr_enhanced);
+    }
+
+    #[test]
+    fn test_desktop_frame_processor_seam() {
+        let test_scene = generate_synthetic_test_scene(160, 120);
+        let mut processor = NightVisionPipeline::new(PipelineConfig::default());
+
+        assert_eq!(processor.backend_name(), "Desktop Multi-Core Rayon (f32 FPU)");
+
+        processor.set_display_mode(DisplayMode::TacticalGreenPhosphor);
+        assert_eq!(processor.display_mode(), DisplayMode::TacticalGreenPhosphor);
+
+        let mut out_frame = image::RgbImage::new(160, 120);
+        processor.process_frame_into(&test_scene, &mut out_frame);
+        assert_eq!(out_frame.dimensions(), (160, 120));
+
+        let out_alloc = processor.process_frame(&test_scene);
+        assert_eq!(out_alloc.dimensions(), (160, 120));
+
+        processor.reset();
     }
 }

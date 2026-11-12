@@ -10,6 +10,7 @@ use crate::enhancement::{
     apply_clahe, apply_exposure_and_autogating, apply_retinex, EnhancementConfig,
 };
 use crate::modes::{render_mode, DisplayMode};
+use crate::processor::FrameProcessor;
 use crate::spatial::{denoise_image, SpatialDenoiseConfig};
 use crate::temporal::{AdaptiveTemporalAccumulator, TemporalConfig};
 
@@ -246,6 +247,37 @@ impl NightVisionPipeline {
         };
 
         (output, breakdown)
+    }
+}
+
+impl FrameProcessor for NightVisionPipeline {
+    fn process_frame_into(&mut self, input: &RgbImage, output: &mut RgbImage) {
+        let (w, h) = input.dimensions();
+        if output.dimensions() != (w, h) {
+            *output = image::ImageBuffer::new(w, h);
+        }
+        let enhanced = self.process_frame(input);
+        output.copy_from_slice(enhanced.as_raw());
+    }
+
+    fn process_frame(&mut self, input: &RgbImage) -> RgbImage {
+        self.process_frame(input)
+    }
+
+    fn reset(&mut self) {
+        self.reset();
+    }
+
+    fn set_display_mode(&mut self, mode: DisplayMode) {
+        self.config.mode = mode;
+    }
+
+    fn display_mode(&self) -> DisplayMode {
+        self.config.mode
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "Desktop Multi-Core Rayon (f32 FPU)"
     }
 }
 

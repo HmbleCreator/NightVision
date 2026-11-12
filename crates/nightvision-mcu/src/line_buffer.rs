@@ -54,3 +54,4 @@ impl<const WIDTH: usize> LineBuffer3<WIDTH> {
         (top, mid, bot)
     }
 }
+

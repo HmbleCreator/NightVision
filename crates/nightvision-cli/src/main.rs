@@ -7,9 +7,10 @@ use image::{ImageBuffer, Rgb, RgbImage};
 use indicatif::ProgressBar;
 use nightvision_core::{
     calculate_psnr, calculate_ssim, generate_synthetic_test_scene, CmosSensorConfig,
-    CmosSensorSimulator, DisplayMode, LuxLevel, NightVisionPipeline, PipelineConfig,
+    CmosSensorSimulator, DisplayMode, FrameProcessor, LuxLevel, NightVisionPipeline,
+    PipelineConfig,
 };
-use nightvision_mcu::{McuEngineConfig, McuNightVisionEngine};
+use nightvision_mcu::{McuDynamicProcessor, McuEngineConfig, McuNightVisionEngine};
 
 #[derive(Parser)]
 #[command(
@@ -53,6 +54,10 @@ enum Commands {
         #[arg(long)]
         simulate_lux: Option<f64>,
 
+        /// Execution backend engine
+        #[arg(short, long, value_enum, default_value_t = BackendArg::Desktop)]
+        backend: BackendArg,
+
         /// Tactical display mode
         #[arg(short, long, value_enum, default_value_t = ModeArg::FullColor)]
         mode: ModeArg,
@@ -83,6 +88,12 @@ enum Commands {
         #[arg(short, long, default_value = "output/demo")]
         output_dir: PathBuf,
     },
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
+enum BackendArg {
+    Desktop,
+    Mcu,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -267,6 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             input,
             output,
             simulate_lux,
+            backend,
             mode,
             exposure,
             gamma,
@@ -289,15 +301,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 src_img
             };
 
-            let mut config = PipelineConfig::default();
-            config.mode = mode.into();
-            config.enhancement.exposure_gain = exposure;
-            config.enhancement.gamma = gamma;
+            // Instantiate any adapter satisfying the FrameProcessor seam
+            let mut processor: Box<dyn FrameProcessor> = match backend {
+                BackendArg::Desktop => {
+                    let mut config = PipelineConfig::default();
+                    config.mode = mode.into();
+                    config.enhancement.exposure_gain = exposure;
+                    config.enhancement.gamma = gamma;
+                    Box::new(NightVisionPipeline::new(config))
+                }
+                BackendArg::Mcu => {
+                    let mut config = McuEngineConfig::default();
+                    config.display_mode = mode.into();
+                    Box::new(McuDynamicProcessor::new(config))
+                }
+            };
 
-            println!("Processing through Digital Night Vision pipeline...");
+            println!("Processing via [{}] through FrameProcessor seam...", processor.backend_name());
             let start = Instant::now();
-            let mut pipeline = NightVisionPipeline::new(config);
-            let result = pipeline.process_frame(&target_img);
+            let result = processor.process_frame(&target_img);
             let elapsed = start.elapsed();
 
             if let Some(parent) = output.parent() {

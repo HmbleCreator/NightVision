@@ -4,9 +4,16 @@ use eframe::egui;
 use image::{ImageBuffer, Rgb, RgbImage};
 use nightvision_core::{
     calculate_psnr, calculate_ssim, generate_synthetic_test_scene, CmosSensorConfig,
-    CmosSensorSimulator, DisplayMode, LuxLevel, NightVisionPipeline, PipelineConfig,
-    SensorSimulationStats,
+    CmosSensorSimulator, DisplayMode, FrameProcessor, LuxLevel, NightVisionPipeline,
+    PipelineConfig, SensorSimulationStats,
 };
+use nightvision_mcu::{McuDynamicProcessor, McuEngineConfig};
+
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum EngineBackend {
+    DesktopFpu,
+    McuFixedPoint,
+}
 
 #[derive(PartialEq, Clone, Copy)]
 enum ViewMode {
@@ -18,6 +25,8 @@ enum ViewMode {
 struct NightVisionApp {
     sensor_sim: CmosSensorSimulator,
     pipeline: NightVisionPipeline,
+    mcu_processor: McuDynamicProcessor,
+    engine_backend: EngineBackend,
 
     // Scene & Sensor State
     reference_scene: RgbImage,
@@ -51,10 +60,13 @@ impl Default for NightVisionApp {
         let reference_scene = generate_synthetic_test_scene(480, 320);
         let sensor_sim = CmosSensorSimulator::new(CmosSensorConfig::default());
         let pipeline = NightVisionPipeline::new(PipelineConfig::default());
+        let mcu_processor = McuDynamicProcessor::new(McuEngineConfig::default());
 
         let mut app = Self {
             sensor_sim,
             pipeline,
+            mcu_processor,
+            engine_backend: EngineBackend::DesktopFpu,
             reference_scene: reference_scene.clone(),
             current_raw_frame: reference_scene.clone(),
             current_enhanced_frame: reference_scene,
@@ -94,17 +106,26 @@ impl NightVisionApp {
         self.current_raw_frame = raw.clone();
         self.sensor_stats = Some(stats);
 
-        // 2. Synchronize pipeline config
-        self.pipeline.config.mode = self.display_mode;
-        self.pipeline.config.enhancement.exposure_gain = self.exposure_gain;
-        self.pipeline.config.enhancement.gamma = self.gamma;
-        self.pipeline.config.temporal.static_blend_weight = self.temporal_weight;
-        self.pipeline.config.spatial.guided_radius = self.guided_radius;
-        self.pipeline.config.enhancement.clahe_clip_limit = self.clahe_clip;
-        self.pipeline.config.enhancement.auto_gating_threshold = self.auto_gating_thresh;
+        // 2. Select backend through canonical FrameProcessor seam
+        let processor: &mut dyn FrameProcessor = match self.engine_backend {
+            EngineBackend::DesktopFpu => {
+                self.pipeline.config.mode = self.display_mode;
+                self.pipeline.config.enhancement.exposure_gain = self.exposure_gain;
+                self.pipeline.config.enhancement.gamma = self.gamma;
+                self.pipeline.config.temporal.static_blend_weight = self.temporal_weight;
+                self.pipeline.config.spatial.guided_radius = self.guided_radius;
+                self.pipeline.config.enhancement.clahe_clip_limit = self.clahe_clip;
+                self.pipeline.config.enhancement.auto_gating_threshold = self.auto_gating_thresh;
+                &mut self.pipeline
+            }
+            EngineBackend::McuFixedPoint => {
+                self.mcu_processor.set_display_mode(self.display_mode);
+                &mut self.mcu_processor
+            }
+        };
 
-        // 3. Process through NightVision computational pipeline
-        self.current_enhanced_frame = self.pipeline.process_frame(&raw);
+        // 3. Process through canonical FrameProcessor seam
+        self.current_enhanced_frame = processor.process_frame(&raw);
 
         self.last_psnr = calculate_psnr(&self.reference_scene, &self.current_enhanced_frame);
         self.last_ssim = calculate_ssim(&self.reference_scene, &self.current_enhanced_frame);
@@ -171,6 +192,30 @@ impl eframe::App for NightVisionApp {
             .min_width(320.0)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
+
+                ui.heading("Execution Backend Engine");
+                if ui
+                    .radio_value(
+                        &mut self.engine_backend,
+                        EngineBackend::DesktopFpu,
+                        "💻 Desktop Multi-Core FPU (Rayon)",
+                    )
+                    .clicked()
+                {
+                    self.trigger_capture_and_enhance();
+                }
+                if ui
+                    .radio_value(
+                        &mut self.engine_backend,
+                        EngineBackend::McuFixedPoint,
+                        "⚡ MCU Fixed-Point Streaming (<2KB)",
+                    )
+                    .clicked()
+                {
+                    self.trigger_capture_and_enhance();
+                }
+
+                ui.separator();
 
                 ui.heading("Illuminance & Sensor");
                 ui.horizontal(|ui| {
@@ -274,6 +319,14 @@ impl eframe::App for NightVisionApp {
         // Bottom Telemetry Panel
         egui::TopBottomPanel::bottom("telemetry").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 200, 255),
+                    format!("Backend: {}", match self.engine_backend {
+                        EngineBackend::DesktopFpu => "Desktop FPU (Rayon)",
+                        EngineBackend::McuFixedPoint => "MCU Streaming (<2KB)",
+                    }),
+                );
+                ui.separator();
                 if let Some(stats) = &self.sensor_stats {
                     ui.label(format!(
                         "Photons/px: {:.2} e- | Read Noise: {:.2} e- | Gain: {:.1}x (ISO)",

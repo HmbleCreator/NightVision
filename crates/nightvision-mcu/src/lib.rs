@@ -19,7 +19,7 @@ pub use fixed_math::{
 };
 pub use line_buffer::LineBuffer3;
 pub use lut::{AutoGatingLut, DeterministicNoiseLut, PhosphorLut};
-pub use mcu_pipeline::{McuEngineConfig, McuNightVisionEngine};
+pub use mcu_pipeline::{McuDynamicProcessor, McuEngineConfig, McuNightVisionEngine};
 pub use optimization_engine::{McuOptimizationPackage, OptimizationEngine, SensorHardwareProfile};
 
 #[cfg(test)]
@@ -48,4 +48,29 @@ mod tests {
         let output = engine.process_frame_streaming(&test_scene);
         assert_eq!(output.dimensions(), (320, 240));
     }
+
+    #[test]
+    fn test_mcu_frame_processor_seam() {
+        use nightvision_core::{DisplayMode, FrameProcessor};
+
+        let test_scene = generate_synthetic_test_scene(160, 120);
+
+        // Test static const-generic engine through FrameProcessor seam
+        let mut static_engine = McuNightVisionEngine::<160, 120>::new(McuEngineConfig::default());
+        static_engine.set_display_mode(DisplayMode::TacticalWhitePhosphor);
+        assert_eq!(static_engine.display_mode(), DisplayMode::TacticalWhitePhosphor);
+
+        let out1 = static_engine.process_frame(&test_scene);
+        assert_eq!(out1.dimensions(), (160, 120));
+
+        // Test dynamic adapter through FrameProcessor seam
+        let mut dyn_engine = McuDynamicProcessor::new(McuEngineConfig::default());
+        dyn_engine.set_display_mode(DisplayMode::TacticalGreenPhosphor);
+        assert_eq!(dyn_engine.display_mode(), DisplayMode::TacticalGreenPhosphor);
+
+        let mut out2 = image::RgbImage::new(160, 120);
+        dyn_engine.process_frame_into(&test_scene, &mut out2);
+        assert_eq!(out2.dimensions(), (160, 120));
+    }
 }
+

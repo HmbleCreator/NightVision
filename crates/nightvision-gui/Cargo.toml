@@ -8,6 +8,7 @@ description = "Real-time desktop GUI viewer and interactive simulator for digita
 
 [dependencies]
 nightvision-core = { path = "../nightvision-core" }
+nightvision-mcu = { path = "../nightvision-mcu" }
 eframe = "0.29"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 

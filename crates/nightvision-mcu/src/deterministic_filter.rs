@@ -9,18 +9,23 @@ use crate::lut::DeterministicNoiseLut;
 /// Filters a row using 3x3 local neighborhood and deterministic noise thresholding.
 ///
 /// Preserves sharp edges (text, silhouettes) while aggressively smoothing flat sensor static.
-pub fn filter_line_deterministic<const WIDTH: usize>(
-    top: &[u8; WIDTH],
-    mid: &[u8; WIDTH],
-    bot: &[u8; WIDTH],
-    out: &mut [u8; WIDTH],
+pub fn filter_line_deterministic_slice(
+    top: &[u8],
+    mid: &[u8],
+    bot: &[u8],
+    out: &mut [u8],
     noise_lut: &DeterministicNoiseLut,
 ) {
+    let width = mid.len();
+    if width < 3 || top.len() < width || bot.len() < width || out.len() < width {
+        return;
+    }
+
     // Handle first pixel (x = 0)
     out[0] = mid[0];
 
     // Main 3x3 sliding kernel
-    for x in 1..(WIDTH - 1) {
+    for x in 1..(width - 1) {
         let center = mid[x];
         let threshold = noise_lut.noise_threshold(center);
 
@@ -50,7 +55,19 @@ pub fn filter_line_deterministic<const WIDTH: usize>(
     }
 
     // Handle last pixel
-    out[WIDTH - 1] = mid[WIDTH - 1];
+    out[width - 1] = mid[width - 1];
+}
+
+/// Fixed-width const generic variant of deterministic row filter.
+#[inline(always)]
+pub fn filter_line_deterministic<const WIDTH: usize>(
+    top: &[u8; WIDTH],
+    mid: &[u8; WIDTH],
+    bot: &[u8; WIDTH],
+    out: &mut [u8; WIDTH],
+    noise_lut: &DeterministicNoiseLut,
+) {
+    filter_line_deterministic_slice(top, mid, bot, out, noise_lut);
 }
 
 /// Lightweight single-scale integer unsharp mask for local contrast enhancement.
@@ -65,3 +82,4 @@ pub fn integer_unsharp_mask(original: u8, blurred: u8, boost_shift: u8) -> u8 {
     let boosted = orig + (detail >> boost_shift);
     boosted.clamp(0, 255) as u8
 }
+

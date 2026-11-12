@@ -148,3 +148,4 @@ impl DeterministicNoiseLut {
         self.threshold_table[luma as usize]
     }
 }
+
