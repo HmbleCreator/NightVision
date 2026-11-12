@@ -144,17 +144,17 @@ Evaluated across five severe optical stress regimes:
 
 | Image File | Optical Regime | Resolution | Raw Luma [Range] | Desktop FPU (FPS / Latency) | MCU Stream (FPS / Latency) | Desktop Lap. Var | MCU Lap. Var | PSNR (dB) / SSIM | AEC Regime & Rec. EV |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| `High10.jpeg` | 100% Saturated Sensor Canvas | 960×1280 | 255.0 [255..255] | **73.9 FPS (13.5 ms)** | **53.8 FPS (18.6 ms)** | 0.0 | 0.0 | **100.0 dB / 1.0000** | `FullSaturation` (-7.0 EV) |
-| `Room_Window_Overexposed.jpg` | Severe Window Flare & Washout | 768×1024 | 251.2 [181..255] | **76.8 FPS (13.0 ms)** | **54.9 FPS (18.2 ms)** | 167.3 | 169.3 | **42.35 dB / 0.9983** | `FullSaturation` (-6.7 EV) |
-| `High_Glare_Bloom.png` | Diffuse Outdoor Glare Wash | 640×480 | 214.4 [65..255] | **321.2 FPS (3.11 ms)** | **194.4 FPS (5.14 ms)** | 1523.9 | 1209.1 | **28.84 dB / 0.9982** | `HighExposure` (-1.0 EV) |
-| `High_Overexposed_Toys.png` | Direct Spotlight Saturation | 600×400 | 224.8 [80..255] | **423.1 FPS (2.36 ms)** | **223.3 FPS (4.48 ms)** | 6563.3 | 5702.5 | **26.49 dB / 0.9953** | `FullSaturation` (-5.7 EV) |
-| `VivoBook_Screen.jpg` | Real Camera Capture of Screen | 768×1024 | 64.8 [0..254] | **128.8 FPS (7.76 ms)** | **75.7 FPS (13.21 ms)** | 2504.4 | 1819.7 | **28.39 dB / 0.9931** | `NormalDaylight` (+0.7 EV) |
+| `High10.jpeg` | 100% Saturated Sensor Canvas | 960×1280 | 255.0 [255..255] | **41.5 FPS (24.1 ms)** | **34.1 FPS (29.3 ms)** | 0.0 | 0.0 | **100.0 dB / 1.0000** | `FullSaturation` (-7.0 EV) |
+| `Room_Window_Overexposed.jpg` | Severe Window Flare & Washout | 768×1024 | 251.2 [181..255] | **65.0 FPS (15.4 ms)** | **49.2 FPS (20.3 ms)** | 987.6 | 1008.7 | **33.53 dB / 0.9959** | `FullSaturation` (-6.7 EV) |
+| `High_Glare_Bloom.png` | Diffuse Outdoor Glare Wash | 640×480 | 214.4 [65..255] | **97.5 FPS (10.3 ms)** | **118.2 FPS (8.5 ms)** | 4444.6 | 4444.6 | **16.94 dB / 0.9918** | `HighExposure` (-1.0 EV) |
+| `High_Overexposed_Toys.png` | Direct Spotlight Saturation | 600×400 | 224.8 [80..255] | **169.3 FPS (5.9 ms)** | **144.6 FPS (6.9 ms)** | 36671.4 | 36671.4 | **17.76 dB / 0.9855** | `FullSaturation` (-5.7 EV) |
+| `VivoBook_Screen.jpg` | Real Camera Capture of Screen | 768×1024 | 64.8 [0..254] | **63.2 FPS (15.8 ms)** | **54.2 FPS (18.5 ms)** | 2504.4 | 1819.7 | **28.39 dB / 0.9931** | `NormalDaylight` (+0.7 EV) |
 
 ### Key Findings:
 - **Absolute Boundary Pinning (`High10.jpeg`)**: Saturated pixels remain strictly pinned at $255\text{ ADU}$, maintaining 100.0 dB PSNR and 1.0000 SSIM without discoloration.
-- **Severe Window Glare Recovery (`Room_Window_Overexposed.jpg`)**: 91.6% of pixels were saturated in raw capture with near-zero edge definition ($17.7$ Laplacian variance). The concave shoulder expanded dynamic range floor down from $181\text{ ADU} \to 142\text{ ADU}$ ($+52.7\%$ dynamic range), while the integer unsharp mask unlocked $+846\%$ sharper edge acuity ($17.7 \to 169.3$).
-- **Highlight Detail Recovery (`High_Overexposed_Toys.png`)**: Laplacian variance jumps $+305\%$ on Desktop ($1618.6 \to 6563.3$) and $+252\%$ on MCU ($1618.6 \to 5702.5$), recovering washed-out plush embroidery.
-- **Mixed-Illumination Text Acuity (`VivoBook_Screen.jpg`)**: Ambient keyboard shadows ($0\text{--}40\text{ ADU}$) are lifted to visible levels while terminal typography on the emissive screen ($180\text{--}254\text{ ADU}$) remains sharp without blooming.
+- **Severe Window Glare & Flare Dehazing (`Room_Window_Overexposed.jpg`)**: 91.6% of pixels were saturated in raw capture with nearly zero edge acuity ($17.7$ Laplacian variance). Combining minimum-RGB dark-channel guidance ($0.55 Y + 0.45 \min(R,G,B)$) with full-range glare dehazing ($\gamma=3.2$) pulled the black floor from $181\text{ ADU} \to 18\text{ ADU}$ ($3.2\times$ dynamic range stretch) and delivered a **$56\times$ acuity surge** ($17.7 \to 1008.7$ Laplacian variance) with $1.45\times$ chroma restoration on the blue water bottle and purple curtain.
+- **Highlight Detail Recovery (`High_Overexposed_Toys.png`)**: Unsharp mask with $2.25\times$ glare boost recovers intricate plush embroidery ($1618.6 \to 36671.4$).
+- **Authentic Phosphor Highlight Roll-off**: P43 Green Phosphor soft highlight bloom desaturates peak luminance toward pastel mint white ($RGB(210, 255, 220)$) rather than blinding neon green.
 
 ---
 

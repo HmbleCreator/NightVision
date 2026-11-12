@@ -82,10 +82,13 @@ pub fn integer_unsharp_mask(original: u8, blurred: u8, boost_shift: u8) -> u8 {
 
     // Fixed-point unsharp detail amplification:
     // When boost_shift == 1: 1.25x boost (detail + (detail >> 2)), matching Desktop FPU acuity.
+    // When boost_shift == 2: 2.25x boost for high-exposure glare recovery: (orig + (detail << 1) + (detail >> 2)).
     // When boost_shift == 0: 2.0x boost (detail << 1).
     // Otherwise fallback to classic attenuation: (detail >> boost_shift).
     let boosted = if boost_shift == 1 {
         orig + detail + (detail >> 2)
+    } else if boost_shift == 2 {
+        orig + (detail << 1) + (detail >> 2)
     } else if boost_shift == 0 {
         orig + (detail << 1)
     } else {

@@ -774,8 +774,8 @@ fn export_c_tables(output_path: &std::path::Path) -> Result<(), Box<dyn std::err
         let raw_u8 = i as u8;
         let atten: u32 = if raw_u8 < 16 {
             (raw_u8 as u32) * 16
-        } else if raw_u8 > 230 {
-            ((255 - raw_u8 as u32) * 10).min(256)
+        } else if raw_u8 > 248 {
+            ((255 - raw_u8 as u32) * 36).min(256)
         } else {
             256
         };
@@ -821,7 +821,7 @@ fn export_c_tables(output_path: &std::path::Path) -> Result<(), Box<dyn std::err
 
     content.push_str(&format_c_array(
         "NIGHTVISION_CHROMA_GATE",
-        "Dual Chroma Gate (Shadow Noise Roll-off < 16 ADU & Highlight Anti-Magenta > 230 ADU)",
+        "Dual Chroma Gate (Shadow Noise Roll-off < 16 ADU & Highlight Anti-Magenta > 248 ADU)",
         &chroma_gate_lut,
     ));
 
@@ -851,6 +851,15 @@ fn export_c_tables(output_path: &std::path::Path) -> Result<(), Box<dyn std::err
     content.push_str("}\n\n");
     content.push_str("#define NIGHTVISION_UNSHARP_MASK_1_25X(orig, blur) \\\n");
     content.push_str("    nightvision_unsharp_mask_1_25x_u8((uint8_t)(orig), (uint8_t)(blur))\n\n");
+    content.push_str("/**\n * @brief 1-cycle integer unsharp masking with 2.25x boost for high-exposure glare recovery.\n */\n");
+    content.push_str("static inline uint8_t nightvision_unsharp_mask_2_25x_u8(uint8_t orig, uint8_t blur) {\n");
+    content.push_str("    int32_t o = (int32_t)orig;\n");
+    content.push_str("    int32_t b = (int32_t)blur;\n");
+    content.push_str("    int32_t detail = o - b;\n");
+    content.push_str("    return nightvision_clamp_u8(o + (detail << 1) + (detail >> 2));\n");
+    content.push_str("}\n\n");
+    content.push_str("#define NIGHTVISION_UNSHARP_MASK_2_25X(orig, blur) \\\n");
+    content.push_str("    nightvision_unsharp_mask_2_25x_u8((uint8_t)(orig), (uint8_t)(blur))\n\n");
 
     content.push_str("/**\n * @brief Fast integer square root using binary restoration (strictly O(1) cycles).\n */\n");
     content.push_str("static inline uint32_t nightvision_isqrt_u32(uint32_t val) {\n");

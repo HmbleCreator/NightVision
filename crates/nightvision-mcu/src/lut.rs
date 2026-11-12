@@ -78,19 +78,28 @@ impl AutoGatingLut {
                 table[i] = (compressed * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         } else if is_high_exposure {
-            // High exposure / Glare regime:
-            // 1. Contrast expansion in midtones (gamma > 1.0)
-            // 2. Concave power highlight compression on upper codes (strictly anchoring f(255) = 255)
-            let shoulder_start = 140.0 / 255.0; // ~140 ADU
+            // High exposure / Severe glare regime:
+            // Full-Range Glare Dehazing Curve:
+            // 1. Optical Glare Floor Subtraction: haze_floor = clamp((mean_luma - 130.0) * 0.65, 0.0, 75.0)
+            //    (For static MCU export with mean_luma ~ 200, gives 45.5 ADU, matching target ~45 ADU)
+            // 2. Smooth linear toe roll-off below haze_floor (0..haze_floor -> 0..12 ADU)
+            // 3. Monotonic concave power pull-down (gamma = 3.2), strictly anchoring f(255) = 255
+            let haze_floor = ((mean_luma - 130.0) * 0.65).clamp(0.0, 75.0);
+            let toe_max = if haze_floor > 10.0 { 12.0 } else { 0.0 };
+
             for i in 0..256 {
-                let norm = (i as f32) / 255.0;
-                let val = if norm < shoulder_start {
-                    shoulder_start * (norm / shoulder_start).powf(1.15)
+                let x = i as f32;
+                let val = if x < haze_floor {
+                    if haze_floor > 0.0 {
+                        toe_max * (x / haze_floor)
+                    } else {
+                        0.0
+                    }
                 } else {
-                    let t = (norm - shoulder_start) / (1.0 - shoulder_start);
-                    shoulder_start + (1.0 - shoulder_start) * t.powf(2.2)
+                    let t = ((x - haze_floor) / (255.0 - haze_floor)).clamp(0.0, 1.0);
+                    toe_max + (255.0 - toe_max) * t.powf(3.2)
                 };
-                table[i] = (val * 255.0).round().clamp(0.0, 255.0) as u8;
+                table[i] = val.round().clamp(0.0, 255.0) as u8;
             }
         } else {
             let gamma_exp = if gamma > 0.0 && gamma < 1.0 {
@@ -131,7 +140,7 @@ pub struct PhosphorLut {
 }
 
 impl PhosphorLut {
-    /// Authentic P43 Military Green Phosphor (545 nm emission peak).
+    /// Authentic P43 Military Green Phosphor (545 nm emission peak) with highlight desaturation to pastel mint white.
     pub fn p43_green() -> Self {
         let mut lut_r = [0u8; 256];
         let mut lut_g = [0u8; 256];
@@ -141,9 +150,19 @@ impl PhosphorLut {
             let y = (i as f32) / 255.0;
             let val = (y.powf(0.88) * 255.0).clamp(0.0, 255.0);
 
-            lut_r[i] = (val * 0.22).round() as u8;
-            lut_g[i] = (val * 1.00).round() as u8;
-            lut_b[i] = (val * 0.30).round() as u8;
+            let r_base = val * 0.22;
+            let g_base = val * 1.00;
+            let b_base = val * 0.30;
+
+            // Soft highlight desaturation for overexposed regions, converging cleanly to pastel mint white
+            let bloom = y.powf(4.0);
+            let r = r_base * (1.0 - bloom) + 210.0 * bloom;
+            let g = g_base * (1.0 - bloom) + 255.0 * bloom;
+            let b = b_base * (1.0 - bloom) + 220.0 * bloom;
+
+            lut_r[i] = r.round().clamp(0.0, 255.0) as u8;
+            lut_g[i] = g.round().clamp(0.0, 255.0) as u8;
+            lut_b[i] = b.round().clamp(0.0, 255.0) as u8;
         }
 
         Self { lut_r, lut_g, lut_b }
@@ -172,17 +191,29 @@ impl PhosphorLut {
         Self { lut_r, lut_g, lut_b }
     }
 
-    /// High-contrast tactical reconnaissance amber phosphor.
+    /// High-contrast tactical reconnaissance amber phosphor with highlight desaturation to warm white.
     pub fn recon_amber() -> Self {
         let mut lut_r = [0u8; 256];
         let mut lut_g = [0u8; 256];
         let mut lut_b = [0u8; 256];
 
         for i in 0..256 {
-            let val = (i as f32) * 1.02;
-            lut_r[i] = (val * 1.00).round().clamp(0.0, 255.0) as u8;
-            lut_g[i] = (val * 0.82).round().clamp(0.0, 255.0) as u8;
-            lut_b[i] = (val * 0.38).round().clamp(0.0, 255.0) as u8;
+            let y = (i as f32) / 255.0;
+            let val = (y * 255.0).clamp(0.0, 255.0);
+
+            let r_base = val * 1.00;
+            let g_base = val * 0.75;
+            let b_base = val * 0.15;
+
+            // Highlight desaturation converging cleanly to warm white
+            let bloom = y.powf(4.0);
+            let r = r_base * (1.0 - bloom) + 255.0 * bloom;
+            let g = g_base * (1.0 - bloom) + 245.0 * bloom;
+            let b = b_base * (1.0 - bloom) + 220.0 * bloom;
+
+            lut_r[i] = r.round().clamp(0.0, 255.0) as u8;
+            lut_g[i] = g.round().clamp(0.0, 255.0) as u8;
+            lut_b[i] = b.round().clamp(0.0, 255.0) as u8;
         }
 
         Self { lut_r, lut_g, lut_b }
