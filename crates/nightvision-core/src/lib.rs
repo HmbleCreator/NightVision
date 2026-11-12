@@ -24,7 +24,10 @@ pub use metrics::{calculate_psnr, calculate_snr_db, calculate_ssim};
 pub use modes::{render_mode, DisplayMode};
 pub use pipeline::{NightVisionPipeline, PipelineConfig, StageBreakdown};
 pub use processor::FrameProcessor;
-pub use sensor::{CmosSensorConfig, CmosSensorSimulator, LuxLevel, SensorSimulationStats};
+pub use sensor::{
+    CmosSensorConfig, CmosSensorSimulator, ExposureMeteringReport, LuxLevel, SceneLightingRegime,
+    SensorSimulationStats,
+};
 pub use spatial::{denoise_image, SpatialDenoiseConfig};
 pub use temporal::{AdaptiveTemporalAccumulator, TemporalConfig};
 
@@ -153,5 +156,40 @@ mod tests {
         let out_alloc = isp.process_frame(&test_scene);
         assert_eq!(out_alloc.dimensions(), (160, 120));
         isp.reset();
+    }
+
+    #[test]
+    fn test_bidirectional_hdr_and_exposure_telemetry() {
+        let mut isp = ImageSignalProcessor::new(PipelineConfig::default());
+        isp.set_display_mode(DisplayMode::FullColor);
+
+        // 1. Test extreme overexposure / photodiode saturation (Y = 255)
+        let mut sat_frame = ImageBuffer::new(64, 64);
+        for p in sat_frame.pixels_mut() {
+            *p = Rgb([255, 255, 255]);
+        }
+        let out_sat = isp.process_frame(&sat_frame);
+        let rep = isp.exposure_report();
+        assert_eq!(rep.regime, SceneLightingRegime::FullSaturation);
+        assert!(rep.saturated_pixel_fraction > 0.90);
+        assert!(rep.recommended_ev_shift < -3.0);
+
+        // Verify Dual Chroma Gate: saturated highlight must be pure neutral white without color fringing
+        let sample = out_sat.get_pixel(32, 32);
+        assert_eq!(sample[0], sample[1]);
+        assert_eq!(sample[1], sample[2]);
+        assert!(sample[0] >= 240); // Preserved highlight headroom
+
+        // 2. Test ultra-dark scene (Y < 8.0 ADU)
+        isp.reset();
+        let mut dark_frame = ImageBuffer::new(64, 64);
+        for p in dark_frame.pixels_mut() {
+            *p = Rgb([4, 4, 4]);
+        }
+        let out_dark = isp.process_frame(&dark_frame);
+        let rep_dark = isp.exposure_report();
+        assert_eq!(rep_dark.regime, SceneLightingRegime::UltraDark);
+        assert!(rep_dark.recommended_ev_shift > 3.0);
+        assert!(out_dark.get_pixel(32, 32)[0] > 4); // Lifted by Hermite shadow knee
     }
 }

@@ -25,6 +25,24 @@ typedef enum {
     NIGHTVISION_MODE_THERMAL_FUSION   = 4
 } nightvision_mode_t;
 
+/** Scene lighting regime detected by AEC telemetry */
+typedef enum {
+    NIGHTVISION_REGIME_ULTRA_DARK      = 0,
+    NIGHTVISION_REGIME_LOW_LIGHT       = 1,
+    NIGHTVISION_REGIME_NORMAL_DAYLIGHT = 2,
+    NIGHTVISION_REGIME_HIGH_EXPOSURE   = 3,
+    NIGHTVISION_REGIME_FULL_SATURATION = 4
+} nightvision_regime_t;
+
+/** Real-time Auto-Exposure Control (AEC) and scene metering report */
+typedef struct {
+    float mean_luma;
+    float p95_luma;
+    float saturated_pixel_fraction;
+    uint8_t regime; // 0=UltraDark, 1=LowLight, 2=NormalDaylight, 3=HighExposure, 4=FullSaturation
+    float recommended_ev_shift;
+} nightvision_exposure_report_t;
+
 /** Opaque handle to the dynamic streaming night vision engine */
 typedef struct nightvision_engine nightvision_engine_t;
 
@@ -90,6 +108,17 @@ int32_t nightvision_process_line_luma(
     uint32_t width,
     const uint8_t* noise_lut,
     const uint8_t* gating_lut
+);
+
+/**
+ * @brief Retrieves the latest auto-exposure control (AEC) telemetry from the engine.
+ * @param handle Pointer to engine instance.
+ * @param report Output pointer to receive exposure statistics.
+ * @return 0 on success, negative error code on failure.
+ */
+int32_t nightvision_get_exposure_report(
+    nightvision_engine_t* handle,
+    nightvision_exposure_report_t* report
 );
 
 /**

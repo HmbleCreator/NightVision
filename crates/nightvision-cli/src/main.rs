@@ -448,6 +448,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = processor.process_frame(&target_img);
             let elapsed = start.elapsed();
 
+            if let Some(rep) = processor.exposure_report() {
+                println!();
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                println!("Auto-Exposure Control (AEC) & Scene Lighting Telemetry:");
+                println!("  ├── Lighting Regime:       {:?}", rep.regime);
+                println!("  ├── Scene Mean Luminance:  {:>6.2} ADU", rep.mean_luma);
+                println!("  ├── 95th Percentile Luma:  {:>6.2} ADU", rep.p95_luma);
+                println!("  ├── Saturated Pixels:      {:>6.2} %", rep.saturated_pixel_fraction * 100.0);
+                println!("  └── Recommended EV Shift:  {:>+6.2} EV", rep.recommended_ev_shift);
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            }
+
             if let Some(parent) = output.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -754,6 +766,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  [MCU Stream ] Latency: {:>6.2} ms ({:>5.1} FPS) | Mean: {:>5.2} | Range: [{}..{}] | Entropy: {:.3} bits | Speedup: {:>5.1}x",
                     mcu_elapsed_ms, mcu_fps, mcu_mean, mcu_min, mcu_max, mcu_entropy, speedup);
                 println!("  [Fidelity   ] MCU vs Desktop: PSNR: {:.2} dB | SSIM: {:.4}", mcu_vs_desktop_psnr, mcu_vs_desktop_ssim);
+                let rep = mcu_proc.exposure_report();
+                println!("  [AEC Meter  ] Regime: {:?} | Saturated: {:.1}% | Rec. EV: {:>+4.1} EV",
+                    rep.regime, rep.saturated_pixel_fraction * 100.0, rep.recommended_ev_shift);
 
                 // Save individual enhanced images
                 let img_out_dir = output_dir.join(&stem);

@@ -17,6 +17,7 @@ use std::time::Instant;
 use crate::modes::DisplayMode;
 use crate::pipeline::{PipelineConfig, StageBreakdown};
 use crate::processor::FrameProcessor;
+use crate::sensor::ExposureMeteringReport;
 
 /// High-throughput planar Image Signal Processor (ISP).
 pub struct ImageSignalProcessor {
@@ -32,6 +33,8 @@ pub struct ImageSignalProcessor {
     scratch_b: Vec<f32>,
     scratch_c: Vec<f32>,
     scratch_d: Vec<f32>,
+    scratch_e: Vec<f32>,
+    scratch_f: Vec<f32>,
 
     // Temporal accumulator history
     temporal_history_rgb: Vec<[f32; 3]>,
@@ -41,6 +44,7 @@ pub struct ImageSignalProcessor {
     // Auto-exposure scene luminance tracking with 16-frame EMA & deadband hysteresis
     smoothed_luma: f32,
     applied_knee_luma: f32,
+    pub last_exposure_report: ExposureMeteringReport,
 }
 
 impl ImageSignalProcessor {
@@ -56,11 +60,14 @@ impl ImageSignalProcessor {
             scratch_b: Vec::new(),
             scratch_c: Vec::new(),
             scratch_d: Vec::new(),
+            scratch_e: Vec::new(),
+            scratch_f: Vec::new(),
             temporal_history_rgb: Vec::new(),
             temporal_luma_prev: Vec::new(),
             frame_count: 0,
-            smoothed_luma: 16.0 / 255.0,
-            applied_knee_luma: 16.0 / 255.0,
+            smoothed_luma: 16.0,
+            applied_knee_luma: 16.0,
+            last_exposure_report: ExposureMeteringReport::default(),
         }
     }
 
@@ -69,8 +76,14 @@ impl ImageSignalProcessor {
         self.frame_count = 0;
         self.temporal_history_rgb.fill([0.0; 3]);
         self.temporal_luma_prev.fill(0.0);
-        self.smoothed_luma = 16.0 / 255.0;
-        self.applied_knee_luma = 16.0 / 255.0;
+        self.smoothed_luma = 16.0;
+        self.applied_knee_luma = 16.0;
+        self.last_exposure_report = ExposureMeteringReport::default();
+    }
+
+    /// Returns the latest exposure metering and AEC telemetry report.
+    pub fn exposure_report(&self) -> ExposureMeteringReport {
+        self.last_exposure_report
     }
 
     /// Ensure planar scratch buffers are correctly allocated for the given frame dimensions.
@@ -90,12 +103,15 @@ impl ImageSignalProcessor {
         self.scratch_b.resize(n, 0.0);
         self.scratch_c.resize(n, 0.0);
         self.scratch_d.resize(n, 0.0);
+        self.scratch_e.resize(n, 0.0);
+        self.scratch_f.resize(n, 0.0);
 
         self.temporal_history_rgb.resize(n, [0.0; 3]);
         self.temporal_luma_prev.resize(n, 0.0);
         self.frame_count = 0;
-        self.smoothed_luma = 16.0 / 255.0;
-        self.applied_knee_luma = 16.0 / 255.0;
+        self.smoothed_luma = 16.0;
+        self.applied_knee_luma = 16.0;
+        self.last_exposure_report = ExposureMeteringReport::default();
     }
 
     /// Primary execution method: processes incoming frame directly into destination image.
@@ -290,6 +306,8 @@ impl ImageSignalProcessor {
                 &mut self.scratch_b,
                 &mut self.scratch_c,
                 &mut self.scratch_d,
+                &mut self.scratch_e,
+                &mut self.scratch_f,
                 w,
                 h,
                 chroma_r,
@@ -305,6 +323,8 @@ impl ImageSignalProcessor {
                 &mut self.scratch_b,
                 &mut self.scratch_c,
                 &mut self.scratch_d,
+                &mut self.scratch_e,
+                &mut self.scratch_f,
                 w,
                 h,
                 chroma_r,
@@ -315,8 +335,8 @@ impl ImageSignalProcessor {
     }
 
     /// Stage 3: Fuses dynamic exposure boost, continuous Hermite shadow-knee lift,
-    /// chroma-suppression gating (for Y < 15 ADU), Reinhard auto-gating flare suppression,
-    /// and tactical display mode rendering directly into the destination RgbImage buffer.
+    /// highlight-compression shoulder, dual chroma gating (for Y < 15 and Y > 230 ADU),
+    /// Reinhard auto-gating flare suppression, and tactical display mode rendering directly into output.
     fn execute_fused_tone_and_render(&mut self, output: &mut RgbImage, w: usize, h: usize) {
         let n = w * h;
         let exposure_gain = self.config.enhancement.exposure_gain;
@@ -325,29 +345,79 @@ impl ImageSignalProcessor {
         let mode = self.config.mode;
         let sat_boost = self.config.saturation_boost;
 
-        // 1. Scene Mean Luminance Tracking with 16-frame EMA & Hysteresis
-        let current_mean: f32 = self.y_plane.par_iter().sum::<f32>() / (n as f32).max(1.0);
-        let smoothed = if self.frame_count == 0 {
-            current_mean
-        } else {
-            (current_mean + 15.0 * self.smoothed_luma) / 16.0
-        };
-        self.smoothed_luma = smoothed;
+        // 1. Scene Luminance, Saturation, and 16-bin Histogram Telemetry via Parallel Rayon
+        let (sum_luma, sat_count, hist) = self
+            .y_plane
+            .par_chunks(2048)
+            .map(|chunk| {
+                let mut s = 0.0f32;
+                let mut sat = 0usize;
+                let mut h = [0usize; 16];
+                for &y in chunk {
+                    s += y;
+                    let bin = ((y * 15.99).floor() as usize).min(15);
+                    h[bin] += 1;
+                    if y >= (250.0 / 255.0) {
+                        sat += 1;
+                    }
+                }
+                (s, sat, h)
+            })
+            .reduce(
+                || (0.0, 0, [0usize; 16]),
+                |(s1, sat1, h1), (s2, sat2, h2)| {
+                    let mut h = [0usize; 16];
+                    for i in 0..16 {
+                        h[i] = h1[i] + h2[i];
+                    }
+                    (s1 + s2, sat1 + sat2, h)
+                },
+            );
 
-        if self.frame_count == 0 || (smoothed - self.applied_knee_luma).abs() >= (0.5 / 255.0) {
-            self.applied_knee_luma = smoothed;
+        let current_mean_adu = (sum_luma / (n as f32).max(1.0)) * 255.0;
+        let sat_fraction = (sat_count as f32) / (n as f32).max(1.0);
+
+        // Compute 95th percentile luminance
+        let target_p95 = (n as f32 * 0.95) as usize;
+        let mut cum = 0usize;
+        let mut p95_bin = 15usize;
+        for (bin, &count) in hist.iter().enumerate() {
+            cum += count;
+            if cum >= target_p95 {
+                p95_bin = bin;
+                break;
+            }
         }
-        let effective_scene_luma = self.applied_knee_luma;
+        let p95_luma_adu = (p95_bin as f32 * 16.0 + 8.0).min(255.0);
 
-        // Dynamic Hermite Shadow-Knee Lift for ultra-dark scenes (< 8.0 ADU or < 0.0314 normalized)
-        let shadow_boost = if effective_scene_luma < (8.0 / 255.0) {
-            let darkness = ((8.0 / 255.0 - effective_scene_luma) / (7.5 / 255.0)).clamp(0.0, 1.0);
+        let report = ExposureMeteringReport::compute(current_mean_adu, p95_luma_adu, sat_fraction);
+        self.last_exposure_report = report;
+
+        // 2. 16-frame Temporal EMA smoothing and deadband hysteresis
+        let smoothed_adu = if self.frame_count == 0 {
+            current_mean_adu
+        } else {
+            (current_mean_adu + 15.0 * self.smoothed_luma) / 16.0
+        };
+        self.smoothed_luma = smoothed_adu;
+
+        if self.frame_count == 0 || (smoothed_adu - self.applied_knee_luma).abs() >= 0.5 {
+            self.applied_knee_luma = smoothed_adu;
+        }
+        let effective_scene_luma_adu = self.applied_knee_luma;
+
+        let is_ultra_dark = effective_scene_luma_adu < 8.0;
+        let is_high_exposure = effective_scene_luma_adu > 170.0 || p95_luma_adu > 225.0 || sat_fraction > 0.08;
+
+        // Dynamic Hermite Shadow-Knee Lift for ultra-dark scenes (< 8.0 ADU)
+        let shadow_boost = if is_ultra_dark {
+            let darkness = ((8.0 - effective_scene_luma_adu) / 7.5).clamp(0.0, 1.0);
             1.0 + darkness * 1.6 // Up to 2.6x extra gain on deep shadows
         } else {
             1.0
         };
 
-        // 2. Fast parallel peak detection for flare auto-gating
+        // 3. Fast parallel peak detection for flare auto-gating
         let max_luma = self
             .y_plane
             .par_chunks_exact(w)
@@ -371,7 +441,7 @@ impl ImageSignalProcessor {
         let cb_plane = &self.cb_plane;
         let cr_plane = &self.cr_plane;
 
-        // 3. Fused tone curve, chroma-suppression gate, and display mode rendering
+        // 4. Fused bidirectional tone curve, dual chroma gate, and display mode rendering
         output
             .as_flat_samples_mut()
             .samples
@@ -383,24 +453,41 @@ impl ImageSignalProcessor {
                     let idx = row_offset + px;
                     let luma = y_plane[idx];
 
-                    // Adaptive Hermite Shadow-Knee expansion on lower 32 codes (32/255 = 0.1255)
-                    let knee_mult = if luma < (32.0 / 255.0) {
-                        let t = luma / (32.0 / 255.0);
-                        let s = t * t * (3.0 - 2.0 * t);
-                        shadow_boost * (1.0 - s) + 1.0 * s
+                    // Bidirectional Transfer Function:
+                    let comp = if is_ultra_dark {
+                        // Adaptive Hermite Shadow-Knee expansion on lower 32 codes (32/255 = 0.1255)
+                        let knee_mult = if luma < (32.0 / 255.0) {
+                            let t = luma / (32.0 / 255.0);
+                            let s = t * t * (3.0 - 2.0 * t);
+                            shadow_boost * (1.0 - s) + 1.0 * s
+                        } else {
+                            1.0
+                        };
+                        let boosted = luma * effective_gain * knee_mult;
+                        let lifted = boosted.powf(gamma_exp);
+                        (lifted / (1.0 + lifted * 0.4)).clamp(0.0, 1.0)
+                    } else if is_high_exposure {
+                        // High exposure inverse Hermite highlight-compression shoulder
+                        let shoulder_start = 0.55f32; // ~140 ADU
+                        if luma < shoulder_start {
+                            ((luma / shoulder_start).powf(1.15) * shoulder_start).clamp(0.0, 1.0)
+                        } else {
+                            let t = ((luma - shoulder_start) / (1.0 - shoulder_start)).clamp(0.0, 1.0);
+                            let s = t * t * (3.0 - 2.0 * t);
+                            (shoulder_start + s * (0.95 - shoulder_start)).clamp(0.0, 1.0)
+                        }
                     } else {
-                        1.0
+                        let boosted = luma * effective_gain;
+                        let lifted = boosted.powf(gamma_exp);
+                        (lifted / (1.0 + lifted * 0.35)).clamp(0.0, 1.0)
                     };
 
-                    // Exposure amplification + Adaptive Gamma + Soft-Knee Auto-Gating
-                    let boosted = luma * effective_gain * knee_mult;
-                    let lifted = boosted.powf(gamma_exp);
-                    let comp = (lifted / (1.0 + lifted * 0.4)).clamp(0.0, 1.0);
-
-                    // Chroma-Suppression Gate for Y < 15 ADU (15/255 = 0.0588):
-                    // In near-total darkness, damp random chroma noise toward neutral (0.5).
-                    // Completely eliminates neon blue/magenta blotches in dark shadows!
-                    let chroma_gate = (luma / (15.0 / 255.0)).clamp(0.0, 1.0);
+                    // Bidirectional Dual Chroma Gate:
+                    // 1. Lower gate for dark shadows (Y < 15 ADU) to prevent blue/magenta noise blotches
+                    let lower_chroma_gate = (luma / (15.0 / 255.0)).clamp(0.0, 1.0);
+                    // 2. Upper gate for extreme highlights (Y > 230 ADU) to prevent false magenta/cyan clipping
+                    let upper_chroma_gate = ((1.0 - luma) / (25.0 / 255.0)).clamp(0.0, 1.0);
+                    let chroma_gate = lower_chroma_gate * upper_chroma_gate;
 
                     let (r, g, b) = match mode {
                         DisplayMode::FullColor => {
@@ -476,6 +563,10 @@ impl FrameProcessor for ImageSignalProcessor {
 
     fn backend_name(&self) -> &'static str {
         "Desktop Deep ISP (Physics-Gated Planar FPU)"
+    }
+
+    fn exposure_report(&self) -> Option<ExposureMeteringReport> {
+        Some(self.last_exposure_report)
     }
 }
 
@@ -626,6 +717,8 @@ fn guided_filter_cross_planar(
     sa: &mut [f32],
     sb: &mut [f32],
     sc: &mut [f32],
+    sd: &mut [f32],
+    se: &mut [f32],
     w: usize,
     h: usize,
     r: usize,
@@ -633,13 +726,13 @@ fn guided_filter_cross_planar(
 ) {
     let n = w * h;
 
-    // sa = mean_I
-    box_filter_planar(guide, sa, sb, w, h, r);
+    // 1. sa = mean_I (using se as temp)
+    box_filter_planar(guide, sa, se, w, h, r);
 
-    // sb = mean_p
-    box_filter_planar(src, sb, sc, w, h, r);
+    // 2. sb = mean_p (using se as temp)
+    box_filter_planar(src, sb, se, w, h, r);
 
-    // sc = I * p
+    // 3. sc = guide * src -> dst = mean_Ip (using se as temp)
     sc[..n]
         .par_iter_mut()
         .zip(guide.par_iter())
@@ -647,44 +740,48 @@ fn guided_filter_cross_planar(
         .for_each(|((c, &g), &p)| {
             *c = g * p;
         });
+    box_filter_planar(&sc[..n], dst, se, w, h, r);
 
-    // dst = mean_Ip
-    box_filter_planar(&sc[..n], dst, sb, w, h, r);
-
-    // Compute variance of guide
+    // 4. sc = guide * guide -> sd = mean_I2 (using se as temp)
     sc[..n].par_iter_mut().zip(guide.par_iter()).for_each(|(c, &g)| {
         *c = g * g;
     });
-    // sb = mean_I2
-    box_filter_planar(&sc[..n], sb, dst, w, h, r);
+    box_filter_planar(&sc[..n], sd, se, w, h, r);
 
-    // Calculate a and b
-    sb[..n]
+    // 5. Calculate a and b:
+    //    cov_ip = mean_ip - mean_i * mean_p
+    //    var_i  = mean_i2 - mean_i^2
+    //    a = cov_ip / (var_i + eps)
+    //    b = mean_p - a * mean_i
+    // Store a in sc, store b in sd
+    sc[..n]
         .par_iter_mut()
-        .zip(sc[..n].par_iter_mut())
+        .zip(sd[..n].par_iter_mut())
         .zip(sa[..n].par_iter())
+        .zip(sb[..n].par_iter())
         .zip(dst[..n].par_iter())
-        .for_each(|(((b_val, c_val), &mu_i), &mean_ip)| {
-            let var_i = (*b_val - mu_i * mu_i).max(0.0);
-            let cov_ip = mean_ip - mu_i * *c_val; // *c_val is mean_p from earlier
+        .for_each(|((((a_out, b_out), &mu_i), &mu_p), &mean_ip)| {
+            let mean_i2 = *b_out;
+            let var_i = (mean_i2 - mu_i * mu_i).max(0.0);
+            let cov_ip = mean_ip - mu_i * mu_p;
             let a = cov_ip / (var_i + eps);
-            let b = *c_val - a * mu_i;
-            *b_val = a;
-            *c_val = b;
+            let b = mu_p - a * mu_i;
+            *a_out = a;
+            *b_out = b;
         });
 
-    // Smooth a -> dst
-    box_filter_planar(&sb[..n], dst, sa, w, h, r);
+    // 6. Smooth a: sc -> dst (using se as temp)
+    box_filter_planar(&sc[..n], dst, se, w, h, r);
 
-    // Smooth b -> sb
-    box_filter_planar(&sc[..n], sb, sa, w, h, r);
+    // 7. Smooth b: sd -> sb (using se as temp)
+    box_filter_planar(&sd[..n], sb, se, w, h, r);
 
-    // dst = mean_a * guide + mean_b
+    // 8. dst = mean_a * guide + mean_b
     dst[..n]
         .par_iter_mut()
         .zip(guide.par_iter())
         .zip(sb[..n].par_iter())
-        .for_each(|((out, &g), &b)| {
-            *out = *out * g + b;
+        .for_each(|((out, &g), &mean_b)| {
+            *out = *out * g + mean_b;
         });
 }

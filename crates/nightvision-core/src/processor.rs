@@ -5,6 +5,7 @@
 
 use image::{ImageBuffer, RgbImage};
 use crate::modes::DisplayMode;
+use crate::sensor::ExposureMeteringReport;
 
 /// Common interface for night vision frame enhancement engines.
 pub trait FrameProcessor {
@@ -32,5 +33,10 @@ pub trait FrameProcessor {
 
     /// Human-readable name of the backend engine (e.g. "Desktop Rayon FPU", "MCU Fixed-Point Streaming").
     fn backend_name(&self) -> &'static str;
+
+    /// Real-time Auto-Exposure Control (AEC) and scene lighting analysis.
+    fn exposure_report(&self) -> Option<ExposureMeteringReport> {
+        None
+    }
 }
 

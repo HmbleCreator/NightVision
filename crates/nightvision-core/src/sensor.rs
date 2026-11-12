@@ -229,3 +229,83 @@ impl CmosSensorSimulator {
     }
 }
 
+/// Scene lighting regime detected by Auto-Exposure Control (AEC).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SceneLightingRegime {
+    /// Extreme photon starvation (< 8.0 ADU mean) requiring Hermite shadow-knee expansion.
+    UltraDark,
+    /// Dim night illumination (8.0 to 45.0 ADU mean).
+    LowLight,
+    /// Balanced standard scene (45.0 to 170.0 ADU mean).
+    NormalDaylight,
+    /// Glare, strong backlighting, or high dynamic range highlights (> 170.0 ADU or p95 > 225.0 ADU).
+    HighExposure,
+    /// Severe photodiode well saturation (> 30% pixels clipped at 254..255 ADU).
+    FullSaturation,
+}
+
+/// Comprehensive Auto-Exposure Control (AEC) and scene metering report.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ExposureMeteringReport {
+    /// Scene mean luminance (0.0 to 255.0 ADU)
+    pub mean_luma: f32,
+    /// 95th percentile luminance (0.0 to 255.0 ADU)
+    pub p95_luma: f32,
+    /// Fraction of pixels reaching photodiode saturation (250..255 ADU)
+    pub saturated_pixel_fraction: f32,
+    /// Detected scene lighting regime
+    pub regime: SceneLightingRegime,
+    /// Recommended Electronic Shutter / Analog Gain EV shift (e.g. -4.0 EV for blinding sun, +3.0 EV for starlight)
+    pub recommended_ev_shift: f32,
+}
+
+impl Default for ExposureMeteringReport {
+    fn default() -> Self {
+        Self {
+            mean_luma: 16.0,
+            p95_luma: 64.0,
+            saturated_pixel_fraction: 0.0,
+            regime: SceneLightingRegime::LowLight,
+            recommended_ev_shift: 2.0,
+        }
+    }
+}
+
+impl ExposureMeteringReport {
+    /// Computes exposure metrics, lighting regime, and recommended EV compensation.
+    pub fn compute(mean_luma: f32, p95_luma: f32, saturated_fraction: f32) -> Self {
+        let regime = if saturated_fraction > 0.30 || (mean_luma >= 254.0 && p95_luma >= 254.0) {
+            SceneLightingRegime::FullSaturation
+        } else if mean_luma < 8.0 {
+            SceneLightingRegime::UltraDark
+        } else if mean_luma > 170.0 || p95_luma > 225.0 || saturated_fraction > 0.08 {
+            SceneLightingRegime::HighExposure
+        } else if mean_luma <= 45.0 {
+            SceneLightingRegime::LowLight
+        } else {
+            SceneLightingRegime::NormalDaylight
+        };
+
+        // Midtone target ~ 100 ADU (~18% gray in sRGB space)
+        let target = 100.0f32;
+        let recommended_ev_shift = if regime == SceneLightingRegime::FullSaturation {
+            -4.0 - (saturated_fraction * 3.0)
+        } else if mean_luma > target {
+            let ratio = (mean_luma / target).max(1.0);
+            -ratio.log2().clamp(0.0, 6.0)
+        } else {
+            let ratio = (target / mean_luma.max(1.0)).max(1.0);
+            ratio.log2().clamp(0.0, 6.0)
+        };
+
+        Self {
+            mean_luma,
+            p95_luma,
+            saturated_pixel_fraction: saturated_fraction,
+            regime,
+            recommended_ev_shift,
+        }
+    }
+}
+
+

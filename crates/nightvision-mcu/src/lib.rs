@@ -141,8 +141,55 @@ mod tests {
             );
             assert_eq!(line_res, 0);
 
+            // Test C-FFI AEC exposure report retrieval
+            let mut rep = ffi::nightvision_exposure_report_t {
+                mean_luma: 0.0,
+                p95_luma: 0.0,
+                saturated_pixel_fraction: 0.0,
+                regime: 0,
+                recommended_ev_shift: 0.0,
+            };
+            let rep_res = ffi::nightvision_get_exposure_report(handle, &mut rep);
+            assert_eq!(rep_res, 0);
+            assert!(rep.mean_luma > 0.0);
+
             ffi::nightvision_destroy(handle);
         }
+    }
+
+    #[test]
+    fn test_mcu_bidirectional_hdr_and_chroma_gate() {
+        use crate::lut::AutoGatingLut;
+        use nightvision_core::DisplayMode;
+
+        // 1. Verify AutoGatingLut across regimes
+        let lut_dark = AutoGatingLut::new_bidirectional(2.8, 0.60, 0.88, 5.0, 30.0, 0.0);
+        let lut_norm = AutoGatingLut::new_bidirectional(1.5, 0.80, 0.88, 80.0, 160.0, 0.0);
+        let lut_high = AutoGatingLut::new_bidirectional(1.0, 1.00, 0.88, 220.0, 250.0, 0.25);
+
+        // Deep shadow code (10 ADU) lifted higher in dark regime than normal
+        assert!(lut_dark.lookup(10) > lut_norm.lookup(10));
+        // High exposure knee smoothly rolls off top codes
+        assert!(lut_high.lookup(255) >= 240);
+        assert!(lut_high.lookup(200) < lut_high.lookup(255));
+
+        // 2. Test MCU processor on extreme saturation (Y = 255)
+        let config = McuEngineConfig::default().with_mode(DisplayMode::FullColor);
+        let mut proc = McuDynamicProcessor::new(config);
+        let mut sat_frame = image::RgbImage::new(64, 64);
+        for p in sat_frame.pixels_mut() {
+            *p = image::Rgb([255, 255, 255]);
+        }
+        let out_sat = proc.process_frame(&sat_frame);
+        let rep = proc.exposure_report();
+        assert_eq!(rep.regime, nightvision_core::SceneLightingRegime::FullSaturation);
+        assert!(rep.saturated_pixel_fraction > 0.90);
+
+        // Verify Dual Chroma Gate: saturated pixel is neutral white, no color tint
+        let p = out_sat.get_pixel(32, 32);
+        assert_eq!(p[0], p[1]);
+        assert_eq!(p[1], p[2]);
+        assert!(p[0] >= 240);
     }
 }
 

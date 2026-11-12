@@ -142,6 +142,45 @@ pub unsafe extern "C" fn nightvision_process_line_luma(
     0
 }
 
+/// ABI-stable C representation of exposure metering and AEC telemetry report.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct nightvision_exposure_report_t {
+    pub mean_luma: f32,
+    pub p95_luma: f32,
+    pub saturated_pixel_fraction: f32,
+    pub regime: u8, // 0=UltraDark, 1=LowLight, 2=NormalDaylight, 3=HighExposure, 4=FullSaturation
+    pub recommended_ev_shift: f32,
+}
+
+/// Retrieves the latest auto-exposure control (AEC) and scene metering report.
+#[no_mangle]
+pub unsafe extern "C" fn nightvision_get_exposure_report(
+    handle: *mut McuDynamicProcessor,
+    report: *mut nightvision_exposure_report_t,
+) -> i32 {
+    if handle.is_null() || report.is_null() {
+        return -1;
+    }
+    let proc = &*handle;
+    let rep = proc.exposure_report();
+    let reg_u8 = match rep.regime {
+        nightvision_core::SceneLightingRegime::UltraDark => 0,
+        nightvision_core::SceneLightingRegime::LowLight => 1,
+        nightvision_core::SceneLightingRegime::NormalDaylight => 2,
+        nightvision_core::SceneLightingRegime::HighExposure => 3,
+        nightvision_core::SceneLightingRegime::FullSaturation => 4,
+    };
+    *report = nightvision_exposure_report_t {
+        mean_luma: rep.mean_luma,
+        p95_luma: rep.p95_luma,
+        saturated_pixel_fraction: rep.saturated_pixel_fraction,
+        regime: reg_u8,
+        recommended_ev_shift: rep.recommended_ev_shift,
+    };
+    0
+}
+
 /// Returns library version string.
 #[no_mangle]
 pub extern "C" fn nightvision_version() -> *const c_char {

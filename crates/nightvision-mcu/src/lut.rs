@@ -15,7 +15,7 @@ pub struct AutoGatingLut {
 impl AutoGatingLut {
     /// Generates LUT based on sensor gain, gamma curve, and flare auto-gating threshold.
     pub fn new(gain: f32, gamma: f32, auto_gating_threshold: f32) -> Self {
-        Self::new_with_knee(gain, gamma, auto_gating_threshold, 16.0)
+        Self::new_bidirectional(gain, gamma, auto_gating_threshold, 16.0, 128.0, 0.0)
     }
 
     /// Generates an adaptive LUT with dynamic shadow-knee boost for ultra-dark scenes (< 8.0 ADU).
@@ -27,49 +27,90 @@ impl AutoGatingLut {
         auto_gating_threshold: f32,
         mean_luma: f32,
     ) -> Self {
+        Self::new_bidirectional(gain, gamma, auto_gating_threshold, mean_luma, 128.0, 0.0)
+    }
+
+    /// Generates a bidirectional HDR LUT supporting:
+    /// 1. Ultra-dark scenes (< 8.0 ADU): Hermite upward shadow-knee expansion on 0..32 ADU.
+    /// 2. Normal scenes (8.0 to 170.0 ADU): Balanced linear gain + Reinhard soft-knee auto-gating.
+    /// 3. High-exposure / Glare scenes (> 170.0 ADU or p95 > 225.0 ADU or sat_ratio > 0.08):
+    ///    Inverse Hermite highlight-compression shoulder on upper codes (> 140 ADU) that
+    ///    pulls washed-out midtones down, recovers highlight contrast, and prevents hard white clipping.
+    pub fn new_bidirectional(
+        gain: f32,
+        gamma: f32,
+        auto_gating_threshold: f32,
+        mean_luma: f32,
+        p95_luma: f32,
+        sat_ratio: f32,
+    ) -> Self {
         let mut table = [0u8; 256];
-        let gamma_exp = if gamma > 0.0 && gamma < 1.0 {
-            gamma
-        } else {
-            1.0 / gamma.clamp(0.1, 2.0)
-        };
+        let is_ultra_dark = mean_luma < 8.0;
+        let is_high_exposure = mean_luma > 170.0 || p95_luma > 225.0 || sat_ratio > 0.08;
 
-        // When scene mean luminance is below 8.0 ADU, scale the shadow-knee lift factor smoothly
-        let shadow_boost = if mean_luma > 0.0 && mean_luma < 8.0 {
+        if is_ultra_dark {
+            let gamma_exp = if gamma > 0.0 && gamma < 1.0 {
+                gamma
+            } else {
+                1.0 / gamma.clamp(0.1, 2.0)
+            };
             let darkness = ((8.0 - mean_luma) / 7.5).clamp(0.0, 1.0);
-            1.0 + darkness * 1.6 // Up to 2.6x extra gain on deep shadows
+            let shadow_boost = 1.0 + darkness * 1.6; // Up to 2.6x extra gain on deep shadows
+
+            for i in 0..256 {
+                let norm = (i as f32) / 255.0;
+                let knee_multiplier = if i < 32 {
+                    let t = (i as f32) / 32.0;
+                    let smooth_t = t * t * (3.0 - 2.0 * t);
+                    shadow_boost * (1.0 - smooth_t) + 1.0 * smooth_t
+                } else {
+                    1.0
+                };
+
+                let boosted = norm * gain * knee_multiplier;
+                let gamma_lift = boosted.powf(gamma_exp);
+                let compressed = if norm > auto_gating_threshold {
+                    let flare_damping = 1.0 / (1.0 + (norm - auto_gating_threshold) * 6.0);
+                    (gamma_lift * flare_damping) / (1.0 + gamma_lift * 0.4)
+                } else {
+                    gamma_lift / (1.0 + gamma_lift * 0.4)
+                };
+                table[i] = (compressed * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        } else if is_high_exposure {
+            // High exposure / Glare regime:
+            // 1. Contrast expansion in midtones (gamma > 1.0)
+            // 2. Inverse Hermite smooth shoulder compression on upper highlight codes
+            let shoulder_start = 0.55f32; // ~140 ADU
+            for i in 0..256 {
+                let norm = (i as f32) / 255.0;
+                let val = if norm < shoulder_start {
+                    (norm / shoulder_start).powf(1.15) * shoulder_start
+                } else {
+                    let t = (norm - shoulder_start) / (1.0 - shoulder_start);
+                    let s = t * t * (3.0 - 2.0 * t);
+                    shoulder_start + s * (0.95 - shoulder_start)
+                };
+                table[i] = (val * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
         } else {
-            1.0
-        };
-
-        for i in 0..256 {
-            let norm = (i as f32) / 255.0;
-
-            // Smooth Hermite blend across lower 32 codes
-            let knee_multiplier = if i < 32 {
-                let t = (i as f32) / 32.0;
-                let smooth_t = t * t * (3.0 - 2.0 * t);
-                shadow_boost * (1.0 - smooth_t) + 1.0 * smooth_t
+            let gamma_exp = if gamma > 0.0 && gamma < 1.0 {
+                gamma
             } else {
-                1.0
+                1.0 / gamma.clamp(0.1, 2.0)
             };
-
-            // 1. Linear gain amplification with adaptive shadow knee
-            let boosted = norm * gain * knee_multiplier;
-
-            // 2. Adaptive gamma expansion (lifts deep shadow details)
-            let gamma_lift = boosted.powf(gamma_exp);
-
-            // 3. Digital Auto-Gating: Soft-knee Reinhard compression
-            // Clamps headlights / muzzle flashes smoothly without blowing out highlights
-            let compressed = if norm > auto_gating_threshold {
-                let flare_damping = 1.0 / (1.0 + (norm - auto_gating_threshold) * 6.0);
-                (gamma_lift * flare_damping) / (1.0 + gamma_lift * 0.4)
-            } else {
-                gamma_lift / (1.0 + gamma_lift * 0.4)
-            };
-
-            table[i] = (compressed * 255.0).round().clamp(0.0, 255.0) as u8;
+            for i in 0..256 {
+                let norm = (i as f32) / 255.0;
+                let boosted = norm * gain;
+                let gamma_lift = boosted.powf(gamma_exp);
+                let compressed = if norm > auto_gating_threshold {
+                    let flare_damping = 1.0 / (1.0 + (norm - auto_gating_threshold) * 6.0);
+                    (gamma_lift * flare_damping) / (1.0 + gamma_lift * 0.4)
+                } else {
+                    gamma_lift / (1.0 + gamma_lift * 0.4)
+                };
+                table[i] = (compressed * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
         }
 
         Self { table }

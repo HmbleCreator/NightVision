@@ -10,7 +10,7 @@ use crate::fixed_math::{abs_diff_u8, ema_blend_motion_u8, ema_blend_static_u8};
 use crate::line_buffer::LineBuffer3;
 use crate::lut::{AutoGatingLut, DeterministicNoiseLut, PhosphorLut};
 use image::{ImageBuffer, Rgb, RgbImage};
-use nightvision_core::{DisplayMode, FrameProcessor};
+use nightvision_core::{DisplayMode, ExposureMeteringReport, FrameProcessor};
 
 /// Complete configuration for the MCU Streaming NightVision Engine.
 #[derive(Debug, Clone)]
@@ -67,6 +67,7 @@ pub struct McuNightVisionEngine<const WIDTH: usize, const HEIGHT: usize> {
     frame_count: usize,
     smoothed_luma: f32,
     applied_knee_luma: f32,
+    pub last_exposure_report: ExposureMeteringReport,
 }
 
 impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT> {
@@ -79,6 +80,7 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
             frame_count: 0,
             smoothed_luma: 16.0,
             applied_knee_luma: 16.0,
+            last_exposure_report: ExposureMeteringReport::default(),
         }
     }
 
@@ -89,6 +91,12 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
         self.frame_count = 0;
         self.smoothed_luma = 16.0;
         self.applied_knee_luma = 16.0;
+        self.last_exposure_report = ExposureMeteringReport::default();
+    }
+
+    /// Returns the latest exposure metering report.
+    pub fn exposure_report(&self) -> ExposureMeteringReport {
+        self.last_exposure_report
     }
 
     /// Process a complete video frame using the MCU streaming line-buffered pipeline.
@@ -96,20 +104,40 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
         let mut output_frame = ImageBuffer::new(WIDTH as u32, HEIGHT as u32);
         self.line_buffer.reset();
 
-        // Auto-exposure scene luminance tracking with 16-frame EMA smoothing and deadband hysteresis
+        // Auto-exposure scene luminance tracking with 16-frame EMA smoothing, 16-bin histogram, and saturation metering
         if self.config.enable_adaptive_knee && (WIDTH * HEIGHT) > 0 {
             let mut sample_sum = 0u64;
+            let mut hist = [0u16; 16];
+            let mut sat_samples = 0u32;
             let step = ((WIDTH * HEIGHT) / 512).max(1);
             let mut samples = 0u64;
             for i in (0..(WIDTH * HEIGHT)).step_by(step) {
                 let x = (i % WIDTH) as u32;
                 let y = (i / WIDTH) as u32;
                 let p = input_frame.get_pixel(x, y);
-                let y_val = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8) as u64;
-                sample_sum += y_val;
+                let y_val = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8) as u32;
+                sample_sum += y_val as u64;
+                hist[(y_val >> 4).min(15) as usize] += 1;
+                if y_val >= 250 {
+                    sat_samples += 1;
+                }
                 samples += 1;
             }
             let current_mean = (sample_sum as f32) / (samples as f32).max(1.0);
+            let sat_ratio = (sat_samples as f32) / (samples as f32).max(1.0);
+
+            let target_p95 = (samples as f32 * 0.95) as u16;
+            let mut cum = 0u16;
+            let mut p95_bin = 15usize;
+            for (bin, &count) in hist.iter().enumerate() {
+                cum += count;
+                if cum >= target_p95 {
+                    p95_bin = bin;
+                    break;
+                }
+            }
+            let p95_luma = (p95_bin * 16 + 8) as f32;
+            self.last_exposure_report = ExposureMeteringReport::compute(current_mean, p95_luma, sat_ratio);
 
             let smoothed = if self.frame_count == 0 {
                 current_mean
@@ -120,11 +148,14 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
 
             if self.frame_count == 0 || (smoothed - self.applied_knee_luma).abs() >= 0.5 {
                 self.applied_knee_luma = smoothed;
-                if smoothed < 8.0 {
-                    self.config.autogating_lut = AutoGatingLut::new_with_knee(2.8, 0.60, 0.88, smoothed);
-                } else {
-                    self.config.autogating_lut = AutoGatingLut::new(2.8, 0.60, 0.88);
-                }
+                self.config.autogating_lut = AutoGatingLut::new_bidirectional(
+                    2.8,
+                    0.60,
+                    0.88,
+                    smoothed,
+                    p95_luma,
+                    sat_ratio,
+                );
             }
         }
 
@@ -176,10 +207,25 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
                         let p = input_frame.get_pixel(x as u32, out_y);
                         let raw_y = (mid[x] as u32).max(1);
                         let ratio_q8 = ((tone_mapped as u32) << 8) / raw_y;
+
+                        let r_col = ((p[0] as u32 * ratio_q8) >> 8).min(255);
+                        let g_col = ((p[1] as u32 * ratio_q8) >> 8).min(255);
+                        let b_col = ((p[2] as u32 * ratio_q8) >> 8).min(255);
+
+                        let raw_u8 = mid[x];
+                        let chroma_atten_q8: u32 = if raw_u8 < 16 {
+                            (raw_u8 as u32) * 16
+                        } else if raw_u8 > 230 {
+                            ((255 - raw_u8 as u32) * 10).min(256)
+                        } else {
+                            256
+                        };
+
+                        let tm = tone_mapped as u32;
                         [
-                            (((p[0] as u32 * ratio_q8) >> 8).min(255)) as u8,
-                            (((p[1] as u32 * ratio_q8) >> 8).min(255)) as u8,
-                            (((p[2] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                            (((r_col * chroma_atten_q8 + tm * (256 - chroma_atten_q8)) >> 8).min(255)) as u8,
+                            (((g_col * chroma_atten_q8 + tm * (256 - chroma_atten_q8)) >> 8).min(255)) as u8,
+                            (((b_col * chroma_atten_q8 + tm * (256 - chroma_atten_q8)) >> 8).min(255)) as u8,
                         ]
                     } else {
                         self.config.phosphor_lut.map_rgb(tone_mapped)
@@ -200,10 +246,25 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
                     let p = input_frame.get_pixel(x as u32, last_y);
                     let raw_y = (mid[x] as u32).max(1);
                     let ratio_q8 = ((tone_mapped as u32) << 8) / raw_y;
+
+                    let r_col = ((p[0] as u32 * ratio_q8) >> 8).min(255);
+                    let g_col = ((p[1] as u32 * ratio_q8) >> 8).min(255);
+                    let b_col = ((p[2] as u32 * ratio_q8) >> 8).min(255);
+
+                    let raw_u8 = mid[x];
+                    let chroma_atten_q8: u32 = if raw_u8 < 16 {
+                        (raw_u8 as u32) * 16
+                    } else if raw_u8 > 230 {
+                        ((255 - raw_u8 as u32) * 10).min(256)
+                    } else {
+                        256
+                    };
+
+                    let tm = tone_mapped as u32;
                     [
-                        (((p[0] as u32 * ratio_q8) >> 8).min(255)) as u8,
-                        (((p[1] as u32 * ratio_q8) >> 8).min(255)) as u8,
-                        (((p[2] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                        (((r_col * chroma_atten_q8 + tm * (256 - chroma_atten_q8)) >> 8).min(255)) as u8,
+                        (((g_col * chroma_atten_q8 + tm * (256 - chroma_atten_q8)) >> 8).min(255)) as u8,
+                        (((b_col * chroma_atten_q8 + tm * (256 - chroma_atten_q8)) >> 8).min(255)) as u8,
                     ]
                 } else {
                     self.config.phosphor_lut.map_rgb(tone_mapped)
@@ -255,6 +316,10 @@ impl<const WIDTH: usize, const HEIGHT: usize> FrameProcessor for McuNightVisionE
     fn backend_name(&self) -> &'static str {
         "MCU Fixed-Point Streaming (Static Memory Buffer)"
     }
+
+    fn exposure_report(&self) -> Option<ExposureMeteringReport> {
+        Some(self.last_exposure_report)
+    }
 }
 
 /// Dynamic resolution adapter for MCU streaming night vision engine.
@@ -271,6 +336,7 @@ pub struct McuDynamicProcessor {
     frame_count: usize,
     smoothed_luma: f32,
     applied_knee_luma: f32,
+    pub last_exposure_report: ExposureMeteringReport,
 }
 
 impl McuDynamicProcessor {
@@ -285,6 +351,7 @@ impl McuDynamicProcessor {
             frame_count: 0,
             smoothed_luma: 16.0,
             applied_knee_luma: 16.0,
+            last_exposure_report: ExposureMeteringReport::default(),
         }
     }
 
@@ -295,6 +362,19 @@ impl McuDynamicProcessor {
         self.frame_count = 0;
         self.smoothed_luma = 16.0;
         self.applied_knee_luma = 16.0;
+        self.last_exposure_report = ExposureMeteringReport::default();
+    }
+
+    /// Process a frame into a newly allocated RgbImage.
+    pub fn process_frame(&mut self, input: &RgbImage) -> RgbImage {
+        let mut out = ImageBuffer::new(input.width(), input.height());
+        self.process_frame_into(input, &mut out);
+        out
+    }
+
+    /// Returns the latest exposure metering report.
+    pub fn exposure_report(&self) -> ExposureMeteringReport {
+        self.last_exposure_report
     }
 }
 
@@ -312,26 +392,47 @@ impl FrameProcessor for McuDynamicProcessor {
             self.frame_count = 0;
             self.smoothed_luma = 16.0;
             self.applied_knee_luma = 16.0;
+            self.last_exposure_report = ExposureMeteringReport::default();
         }
 
         if output.dimensions() != (w_u32, h_u32) {
             *output = ImageBuffer::new(w_u32, h_u32);
         }
 
-        // Auto-exposure scene luminance tracking with 16-frame EMA smoothing and deadband hysteresis
+        // Auto-exposure scene luminance tracking with 16-frame EMA smoothing, 16-bin histogram, and saturation metering
         if self.config.enable_adaptive_knee && (w * h) > 0 {
             let mut sample_sum = 0u64;
+            let mut hist = [0u16; 16];
+            let mut sat_samples = 0u32;
             let step = ((w * h) / 512).max(1);
             let mut samples = 0u64;
             for i in (0..(w * h)).step_by(step) {
                 let x = (i % w) as u32;
                 let y = (i / w) as u32;
                 let p = input.get_pixel(x, y);
-                let y_val = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8) as u64;
-                sample_sum += y_val;
+                let y_val = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8) as u32;
+                sample_sum += y_val as u64;
+                hist[(y_val >> 4).min(15) as usize] += 1;
+                if y_val >= 250 {
+                    sat_samples += 1;
+                }
                 samples += 1;
             }
             let current_mean = (sample_sum as f32) / (samples as f32).max(1.0);
+            let sat_ratio = (sat_samples as f32) / (samples as f32).max(1.0);
+
+            let target_p95 = (samples as f32 * 0.95) as u16;
+            let mut cum = 0u16;
+            let mut p95_bin = 15usize;
+            for (bin, &count) in hist.iter().enumerate() {
+                cum += count;
+                if cum >= target_p95 {
+                    p95_bin = bin;
+                    break;
+                }
+            }
+            let p95_luma = (p95_bin * 16 + 8) as f32;
+            self.last_exposure_report = ExposureMeteringReport::compute(current_mean, p95_luma, sat_ratio);
 
             let smoothed = if self.frame_count == 0 {
                 current_mean
@@ -342,11 +443,14 @@ impl FrameProcessor for McuDynamicProcessor {
 
             if self.frame_count == 0 || (smoothed - self.applied_knee_luma).abs() >= 0.5 {
                 self.applied_knee_luma = smoothed;
-                if smoothed < 8.0 {
-                    self.config.autogating_lut = AutoGatingLut::new_with_knee(2.8, 0.60, 0.88, smoothed);
-                } else {
-                    self.config.autogating_lut = AutoGatingLut::new(2.8, 0.60, 0.88);
-                }
+                self.config.autogating_lut = AutoGatingLut::new_bidirectional(
+                    2.8,
+                    0.60,
+                    0.88,
+                    smoothed,
+                    p95_luma,
+                    sat_ratio,
+                );
             }
         }
 
@@ -404,10 +508,25 @@ impl FrameProcessor for McuDynamicProcessor {
                         let p = input.get_pixel(x as u32, out_y);
                         let raw_y = (mid[x] as u32).max(1);
                         let ratio_q8 = ((tone_mapped as u32) << 8) / raw_y;
+
+                        let r_col = ((p[0] as u32 * ratio_q8) >> 8).min(255);
+                        let g_col = ((p[1] as u32 * ratio_q8) >> 8).min(255);
+                        let b_col = ((p[2] as u32 * ratio_q8) >> 8).min(255);
+
+                        let raw_u8 = mid[x];
+                        let chroma_atten_q8: u32 = if raw_u8 < 16 {
+                            (raw_u8 as u32) * 16
+                        } else if raw_u8 > 230 {
+                            ((255 - raw_u8 as u32) * 10).min(256)
+                        } else {
+                            256
+                        };
+
+                        let tm = tone_mapped as u32;
                         [
-                            (((p[0] as u32 * ratio_q8) >> 8).min(255)) as u8,
-                            (((p[1] as u32 * ratio_q8) >> 8).min(255)) as u8,
-                            (((p[2] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                            (((r_col * chroma_atten_q8 + tm * (256 - chroma_atten_q8)) >> 8).min(255)) as u8,
+                            (((g_col * chroma_atten_q8 + tm * (256 - chroma_atten_q8)) >> 8).min(255)) as u8,
+                            (((b_col * chroma_atten_q8 + tm * (256 - chroma_atten_q8)) >> 8).min(255)) as u8,
                         ]
                     } else {
                         self.config.phosphor_lut.map_rgb(tone_mapped)
@@ -433,10 +552,25 @@ impl FrameProcessor for McuDynamicProcessor {
                     let p = input.get_pixel(x as u32, last_y);
                     let raw_y = (mid[x] as u32).max(1);
                     let ratio_q8 = ((tone_mapped as u32) << 8) / raw_y;
+
+                    let r_col = ((p[0] as u32 * ratio_q8) >> 8).min(255);
+                    let g_col = ((p[1] as u32 * ratio_q8) >> 8).min(255);
+                    let b_col = ((p[2] as u32 * ratio_q8) >> 8).min(255);
+
+                    let raw_u8 = mid[x];
+                    let chroma_atten_q8: u32 = if raw_u8 < 16 {
+                        (raw_u8 as u32) * 16
+                    } else if raw_u8 > 230 {
+                        ((255 - raw_u8 as u32) * 10).min(256)
+                    } else {
+                        256
+                    };
+
+                    let tm = tone_mapped as u32;
                     [
-                        (((p[0] as u32 * ratio_q8) >> 8).min(255)) as u8,
-                        (((p[1] as u32 * ratio_q8) >> 8).min(255)) as u8,
-                        (((p[2] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                        (((r_col * chroma_atten_q8 + tm * (256 - chroma_atten_q8)) >> 8).min(255)) as u8,
+                        (((g_col * chroma_atten_q8 + tm * (256 - chroma_atten_q8)) >> 8).min(255)) as u8,
+                        (((b_col * chroma_atten_q8 + tm * (256 - chroma_atten_q8)) >> 8).min(255)) as u8,
                     ]
                 } else {
                     self.config.phosphor_lut.map_rgb(tone_mapped)
@@ -468,5 +602,9 @@ impl FrameProcessor for McuDynamicProcessor {
 
     fn backend_name(&self) -> &'static str {
         "MCU Fixed-Point Streaming (Dynamic Adapter)"
+    }
+
+    fn exposure_report(&self) -> Option<ExposureMeteringReport> {
+        Some(self.last_exposure_report)
     }
 }

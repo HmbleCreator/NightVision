@@ -313,5 +313,9 @@ impl FrameProcessor for NightVisionPipeline {
             "Desktop SOTA Physics Engine (Physics-Gated Planar FPU)"
         }
     }
+
+    fn exposure_report(&self) -> Option<crate::sensor::ExposureMeteringReport> {
+        Some(self.isp.exposure_report())
+    }
 }
 
