@@ -478,14 +478,15 @@ impl ImageSignalProcessor {
                         let lifted = boosted.powf(gamma_exp);
                         (lifted / (1.0 + lifted * 0.4)).clamp(0.0, 1.0)
                     } else if is_high_exposure {
-                        // High exposure inverse Hermite highlight-compression shoulder
-                        let shoulder_start = 0.55f32; // ~140 ADU
+                        // High exposure concave highlight-compression shoulder:
+                        // Pulls down upper midtones (140..254 ADU) to expand highlight contrast
+                        // while strictly anchoring f(255) = 255.
+                        let shoulder_start = 140.0 / 255.0; // ~140 ADU
                         if luma < shoulder_start {
-                            ((luma / shoulder_start).powf(1.15) * shoulder_start).clamp(0.0, 1.0)
+                            (shoulder_start * (luma / shoulder_start).powf(1.15)).clamp(0.0, 1.0)
                         } else {
                             let t = ((luma - shoulder_start) / (1.0 - shoulder_start)).clamp(0.0, 1.0);
-                            let s = t * t * (3.0 - 2.0 * t);
-                            (shoulder_start + s * (0.95 - shoulder_start)).clamp(0.0, 1.0)
+                            (shoulder_start + (1.0 - shoulder_start) * t.powf(2.2)).clamp(0.0, 1.0)
                         }
                     } else {
                         let boosted = luma * effective_gain;
@@ -521,10 +522,15 @@ impl ImageSignalProcessor {
                         }
                         DisplayMode::TacticalWhitePhosphor => {
                             let v = (comp * 255.0).round();
+                            // Subtle cool P45 tint in midtones, converging cleanly to pure neutral white at highlight ceiling
+                            let highlight_desat = comp.powf(4.0).clamp(0.0, 1.0);
+                            let r_scale = 0.96 * (1.0 - highlight_desat) + 1.0 * highlight_desat;
+                            let g_scale = 0.98 * (1.0 - highlight_desat) + 1.0 * highlight_desat;
+                            let b_scale = 1.02 * (1.0 - highlight_desat) + 1.0 * highlight_desat;
                             (
-                                (v * 0.95).clamp(0.0, 255.0) as u8,
-                                (v * 0.98).clamp(0.0, 255.0) as u8,
-                                (v * 1.02).clamp(0.0, 255.0) as u8,
+                                (v * r_scale).round().clamp(0.0, 255.0) as u8,
+                                (v * g_scale).round().clamp(0.0, 255.0) as u8,
+                                (v * b_scale).round().clamp(0.0, 255.0) as u8,
                             )
                         }
                         DisplayMode::TacticalGreenPhosphor => {

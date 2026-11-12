@@ -80,16 +80,15 @@ impl AutoGatingLut {
         } else if is_high_exposure {
             // High exposure / Glare regime:
             // 1. Contrast expansion in midtones (gamma > 1.0)
-            // 2. Inverse Hermite smooth shoulder compression on upper highlight codes
-            let shoulder_start = 0.55f32; // ~140 ADU
+            // 2. Concave power highlight compression on upper codes (strictly anchoring f(255) = 255)
+            let shoulder_start = 140.0 / 255.0; // ~140 ADU
             for i in 0..256 {
                 let norm = (i as f32) / 255.0;
                 let val = if norm < shoulder_start {
-                    (norm / shoulder_start).powf(1.15) * shoulder_start
+                    shoulder_start * (norm / shoulder_start).powf(1.15)
                 } else {
                     let t = (norm - shoulder_start) / (1.0 - shoulder_start);
-                    let s = t * t * (3.0 - 2.0 * t);
-                    shoulder_start + s * (0.95 - shoulder_start)
+                    shoulder_start + (1.0 - shoulder_start) * t.powf(2.2)
                 };
                 table[i] = (val * 255.0).round().clamp(0.0, 255.0) as u8;
             }
@@ -150,7 +149,7 @@ impl PhosphorLut {
         Self { lut_r, lut_g, lut_b }
     }
 
-    /// Tactical White Phosphor (P45) with cool high-contrast response.
+    /// Tactical White Phosphor (P45) with cool high-contrast response converging cleanly to neutral white at peak.
     pub fn p45_white() -> Self {
         let mut lut_r = [0u8; 256];
         let mut lut_g = [0u8; 256];
@@ -158,11 +157,16 @@ impl PhosphorLut {
 
         for i in 0..256 {
             let y = (i as f32) / 255.0;
-            let s_curve = y * 255.0;
+            let val = y * 255.0;
 
-            lut_r[i] = (s_curve * 0.95).round() as u8;
-            lut_g[i] = (s_curve * 0.98).round() as u8;
-            lut_b[i] = (s_curve * 1.02).round().clamp(0.0, 255.0) as u8;
+            let highlight_desat = y.powf(4.0);
+            let r_scale = 0.96 * (1.0 - highlight_desat) + 1.0 * highlight_desat;
+            let g_scale = 0.98 * (1.0 - highlight_desat) + 1.0 * highlight_desat;
+            let b_scale = 1.02 * (1.0 - highlight_desat) + 1.0 * highlight_desat;
+
+            lut_r[i] = (val * r_scale).round().clamp(0.0, 255.0) as u8;
+            lut_g[i] = (val * g_scale).round().clamp(0.0, 255.0) as u8;
+            lut_b[i] = (val * b_scale).round().clamp(0.0, 255.0) as u8;
         }
 
         Self { lut_r, lut_g, lut_b }

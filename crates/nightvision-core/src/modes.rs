@@ -75,10 +75,15 @@ pub fn render_mode(img: &RgbImage, mode: DisplayMode, saturation_boost: f32) -> 
                 let y_curve = (y * 1.08 - 0.04).clamp(0.0, 1.0);
                 let val = y_curve * 255.0;
 
-                // P45 white phosphor palette (slight cool-white tint: R: 95%, G: 98%, B: 100%)
-                let r = (val * 0.95).round().clamp(0.0, 255.0) as u8;
-                let g = (val * 0.98).round().clamp(0.0, 255.0) as u8;
-                let b = (val * 1.02).round().clamp(0.0, 255.0) as u8;
+                // P45 white phosphor palette (slight cool-white tint in midtones, converging cleanly to neutral white at highlight ceiling)
+                let highlight_desat = y_curve.powf(4.0);
+                let r_scale = 0.96 * (1.0 - highlight_desat) + 1.0 * highlight_desat;
+                let g_scale = 0.98 * (1.0 - highlight_desat) + 1.0 * highlight_desat;
+                let b_scale = 1.02 * (1.0 - highlight_desat) + 1.0 * highlight_desat;
+
+                let r = (val * r_scale).round().clamp(0.0, 255.0) as u8;
+                let g = (val * g_scale).round().clamp(0.0, 255.0) as u8;
+                let b = (val * b_scale).round().clamp(0.0, 255.0) as u8;
 
                 *o = Rgb([r, g, b]);
             }
