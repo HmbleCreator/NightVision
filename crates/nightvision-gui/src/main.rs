@@ -66,7 +66,7 @@ impl Default for NightVisionApp {
             sensor_sim,
             pipeline,
             mcu_processor,
-            engine_backend: EngineBackend::DesktopFpu,
+            engine_backend: EngineBackend::McuFixedPoint,
             reference_scene: reference_scene.clone(),
             current_raw_frame: reference_scene.clone(),
             current_enhanced_frame: reference_scene,
@@ -197,8 +197,8 @@ impl eframe::App for NightVisionApp {
                 if ui
                     .radio_value(
                         &mut self.engine_backend,
-                        EngineBackend::DesktopFpu,
-                        "💻 Desktop Multi-Core FPU (Rayon)",
+                        EngineBackend::McuFixedPoint,
+                        "⚡ SOTA Physics Engine (Fixed-Point & LUTs)",
                     )
                     .clicked()
                 {
@@ -207,8 +207,8 @@ impl eframe::App for NightVisionApp {
                 if ui
                     .radio_value(
                         &mut self.engine_backend,
-                        EngineBackend::McuFixedPoint,
-                        "⚡ MCU Fixed-Point Streaming (<2KB)",
+                        EngineBackend::DesktopFpu,
+                        "🔬 Offline Forensic Mode (Heavy MSRCR FPU)",
                     )
                     .clicked()
                 {

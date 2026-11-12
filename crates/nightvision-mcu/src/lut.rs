@@ -15,19 +15,47 @@ pub struct AutoGatingLut {
 impl AutoGatingLut {
     /// Generates LUT based on sensor gain, gamma curve, and flare auto-gating threshold.
     pub fn new(gain: f32, gamma: f32, auto_gating_threshold: f32) -> Self {
+        Self::new_with_knee(gain, gamma, auto_gating_threshold, 16.0)
+    }
+
+    /// Generates an adaptive LUT with dynamic shadow-knee boost for ultra-dark scenes (< 8.0 ADU).
+    /// Uses an adaptive Hermite expansion knee on the lowest shadow codes (0..32 ADU) to reveal
+    /// photon-starved objects (such as in scenes with mean luma < 6.0) without blowing out midtones.
+    pub fn new_with_knee(
+        gain: f32,
+        gamma: f32,
+        auto_gating_threshold: f32,
+        mean_luma: f32,
+    ) -> Self {
         let mut table = [0u8; 256];
-        // In low-light tone-mapping, gamma exponent < 1.0 lifts deep shadows
         let gamma_exp = if gamma > 0.0 && gamma < 1.0 {
             gamma
         } else {
             1.0 / gamma.clamp(0.1, 2.0)
         };
 
+        // When scene mean luminance is below 8.0 ADU, scale the shadow-knee lift factor smoothly
+        let shadow_boost = if mean_luma > 0.0 && mean_luma < 8.0 {
+            let darkness = ((8.0 - mean_luma) / 7.5).clamp(0.0, 1.0);
+            1.0 + darkness * 1.6 // Up to 2.6x extra gain on deep shadows
+        } else {
+            1.0
+        };
+
         for i in 0..256 {
             let norm = (i as f32) / 255.0;
 
-            // 1. Linear gain amplification
-            let boosted = norm * gain;
+            // Smooth Hermite blend across lower 32 codes
+            let knee_multiplier = if i < 32 {
+                let t = (i as f32) / 32.0;
+                let smooth_t = t * t * (3.0 - 2.0 * t);
+                shadow_boost * (1.0 - smooth_t) + 1.0 * smooth_t
+            } else {
+                1.0
+            };
+
+            // 1. Linear gain amplification with adaptive shadow knee
+            let boosted = norm * gain * knee_multiplier;
 
             // 2. Adaptive gamma expansion (lifts deep shadow details)
             let gamma_lift = boosted.powf(gamma_exp);

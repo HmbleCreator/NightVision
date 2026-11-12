@@ -55,7 +55,7 @@ enum Commands {
         simulate_lux: Option<f64>,
 
         /// Execution backend engine
-        #[arg(short, long, value_enum, default_value_t = BackendArg::Desktop)]
+        #[arg(short, long, value_enum, default_value_t = BackendArg::Primary)]
         backend: BackendArg,
 
         /// Tactical display mode
@@ -107,8 +107,14 @@ enum Commands {
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
 enum BackendArg {
-    Desktop,
+    /// SOTA Physics-Grounded Engine (Fast Integer Streaming & Noise Profile LUT - Default)
+    Primary,
+    /// MCU Hardware Streaming Adapter (< 2KB SRAM)
     Mcu,
+    /// Offline Laboratory Forensic Mode (Heavy Floating-Point MSRCR + CLAHE)
+    Forensic,
+    /// Legacy alias for desktop FPU
+    Desktop,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -424,16 +430,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Instantiate any adapter satisfying the FrameProcessor seam
             let mut processor: Box<dyn FrameProcessor> = match backend {
-                BackendArg::Desktop => {
+                BackendArg::Primary | BackendArg::Mcu => {
+                    let config = McuEngineConfig::default().with_mode(mode.into());
+                    Box::new(McuDynamicProcessor::new(config))
+                }
+                BackendArg::Forensic | BackendArg::Desktop => {
                     let mut config = PipelineConfig::default();
                     config.mode = mode.into();
                     config.enhancement.exposure_gain = exposure;
                     config.enhancement.gamma = gamma;
                     Box::new(NightVisionPipeline::new(config))
-                }
-                BackendArg::Mcu => {
-                    let config = McuEngineConfig::default().with_mode(mode.into());
-                    Box::new(McuDynamicProcessor::new(config))
                 }
             };
 

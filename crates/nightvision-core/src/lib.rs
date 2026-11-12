@@ -9,6 +9,7 @@
 //!    edge-preserving guided denoising, Retinex reflectance recovery, and CLAHE.
 
 pub mod enhancement;
+pub mod isp;
 pub mod metrics;
 pub mod modes;
 pub mod pipeline;
@@ -18,6 +19,7 @@ pub mod spatial;
 pub mod temporal;
 
 pub use enhancement::{apply_clahe, apply_exposure_and_autogating, apply_retinex, EnhancementConfig};
+pub use isp::ImageSignalProcessor;
 pub use metrics::{calculate_psnr, calculate_snr_db, calculate_ssim};
 pub use modes::{render_mode, DisplayMode};
 pub use pipeline::{NightVisionPipeline, PipelineConfig, StageBreakdown};
@@ -132,5 +134,24 @@ mod tests {
         assert_eq!(out_alloc.dimensions(), (160, 120));
 
         processor.reset();
+    }
+
+    #[test]
+    fn test_isp_planar_zero_alloc_seam() {
+        let test_scene = generate_synthetic_test_scene(160, 120);
+        let mut isp = ImageSignalProcessor::new(PipelineConfig::fast_realtime());
+
+        assert_eq!(isp.backend_name(), "Desktop Deep ISP (Planar Zero-Alloc FPU)");
+
+        isp.set_display_mode(DisplayMode::TacticalWhitePhosphor);
+        assert_eq!(isp.display_mode(), DisplayMode::TacticalWhitePhosphor);
+
+        let mut out_frame = image::RgbImage::new(160, 120);
+        isp.process_frame_into(&test_scene, &mut out_frame);
+        assert_eq!(out_frame.dimensions(), (160, 120));
+
+        let out_alloc = isp.process_frame(&test_scene);
+        assert_eq!(out_alloc.dimensions(), (160, 120));
+        isp.reset();
     }
 }

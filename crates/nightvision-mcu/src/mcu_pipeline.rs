@@ -23,6 +23,8 @@ pub struct McuEngineConfig {
     pub motion_threshold_adu: u8,
     /// Enable local contrast boost via integer unsharp mask
     pub enable_unsharp_boost: bool,
+    /// Enable adaptive shadow-knee expansion for ultra-dark scenes (< 8.0 ADU)
+    pub enable_adaptive_knee: bool,
 }
 
 impl Default for McuEngineConfig {
@@ -34,6 +36,7 @@ impl Default for McuEngineConfig {
             display_mode: DisplayMode::TacticalWhitePhosphor,
             motion_threshold_adu: 16,
             enable_unsharp_boost: true,
+            enable_adaptive_knee: true,
         }
     }
 }
@@ -267,6 +270,25 @@ impl FrameProcessor for McuDynamicProcessor {
 
         if output.dimensions() != (w_u32, h_u32) {
             *output = ImageBuffer::new(w_u32, h_u32);
+        }
+
+        // Adaptive shadow-knee tuning for ultra-dark scenes (< 8.0 ADU)
+        if self.config.enable_adaptive_knee && self.frame_count == 0 && (w * h) > 0 {
+            let mut sample_sum = 0u64;
+            let step = ((w * h) / 512).max(1);
+            let mut samples = 0u64;
+            for i in (0..(w * h)).step_by(step) {
+                let x = (i % w) as u32;
+                let y = (i / w) as u32;
+                let p = input.get_pixel(x, y);
+                let y_val = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8) as u64;
+                sample_sum += y_val;
+                samples += 1;
+            }
+            let mean = (sample_sum as f32) / (samples as f32).max(1.0);
+            if mean < 8.0 {
+                self.config.autogating_lut = AutoGatingLut::new_with_knee(2.8, 0.60, 0.88, mean);
+            }
         }
 
         let motion_thresh = self.config.motion_threshold_adu;
