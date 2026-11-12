@@ -20,3 +20,4 @@ install(EXPORT NightVisionTargets
     NAMESPACE NightVision::
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/NightVision
 )
+
