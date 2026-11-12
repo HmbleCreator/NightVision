@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::enhancement::{
     apply_clahe, apply_exposure_and_autogating, apply_retinex, EnhancementConfig,
 };
+use crate::isp::ImageSignalProcessor;
 use crate::modes::{render_mode, DisplayMode};
 use crate::processor::FrameProcessor;
 use crate::spatial::{denoise_image, SpatialDenoiseConfig};
@@ -38,8 +39,8 @@ impl Default for PipelineConfig {
             saturation_boost: 1.35,
             enable_temporal: true,
             enable_spatial: true,
-            enable_retinex: true,
-            enable_clahe: true,
+            enable_retinex: false, // Default is false: SOTA Physics Engine is primary!
+            enable_clahe: false,   // Default is false: Continuous Hermite Knee replaces blind CLAHE
         }
     }
 }
@@ -94,14 +95,17 @@ pub struct StageBreakdown {
 /// Integrated Digital Night Vision Pipeline.
 pub struct NightVisionPipeline {
     pub config: PipelineConfig,
+    isp: ImageSignalProcessor,
     temporal_accumulator: AdaptiveTemporalAccumulator,
 }
 
 impl NightVisionPipeline {
     pub fn new(config: PipelineConfig) -> Self {
         let temporal_accumulator = AdaptiveTemporalAccumulator::new(config.temporal.clone());
+        let isp = ImageSignalProcessor::new(config.clone());
         Self {
             config,
+            isp,
             temporal_accumulator,
         }
     }
@@ -109,10 +113,20 @@ impl NightVisionPipeline {
     /// Reset internal state (buffers, motion tracking).
     pub fn reset(&mut self) {
         self.temporal_accumulator.reset();
+        self.isp.reset();
     }
 
-    /// Processes an individual frame through the entire computational night vision pipeline.
+    /// Processes an individual frame through the computational night vision pipeline.
+    /// By default, routes through the ultra-fast SOTA Physics-Gated Planar ISP (< 10 ms).
+    /// If `enable_retinex` is explicitly enabled, routes through the legacy offline forensic pipeline.
     pub fn process_frame(&mut self, frame: &RgbImage) -> RgbImage {
+        let mut output = image::ImageBuffer::new(frame.width(), frame.height());
+        self.process_frame_into(frame, &mut output);
+        output
+    }
+
+    /// Legacy offline forensic processing using multi-scale logarithmic Retinex and CLAHE.
+    pub fn process_forensic_frame(&mut self, frame: &RgbImage) -> RgbImage {
         // Step 1: Multi-frame temporal accumulation (SNR boost)
         let frame_after_temporal = if self.config.enable_temporal {
             self.temporal_accumulator.config = self.config.temporal.clone();
@@ -167,6 +181,16 @@ impl NightVisionPipeline {
 
     /// Processes frame and measures execution latency for each algorithmic stage.
     pub fn process_frame_profiled(&mut self, frame: &RgbImage) -> (RgbImage, StageBreakdown) {
+        if self.config.enable_retinex {
+            self.process_forensic_profiled(frame)
+        } else {
+            self.isp.config = self.config.clone();
+            self.isp.process_frame_profiled(frame)
+        }
+    }
+
+    /// Legacy offline forensic profiling using multi-scale logarithmic Retinex and CLAHE.
+    pub fn process_forensic_profiled(&mut self, frame: &RgbImage) -> (RgbImage, StageBreakdown) {
         use std::time::Instant;
 
         let total_start = Instant::now();
@@ -252,12 +276,17 @@ impl NightVisionPipeline {
 
 impl FrameProcessor for NightVisionPipeline {
     fn process_frame_into(&mut self, input: &RgbImage, output: &mut RgbImage) {
-        let (w, h) = input.dimensions();
-        if output.dimensions() != (w, h) {
-            *output = image::ImageBuffer::new(w, h);
+        if self.config.enable_retinex {
+            let (w, h) = input.dimensions();
+            if output.dimensions() != (w, h) {
+                *output = image::ImageBuffer::new(w, h);
+            }
+            let forensic = self.process_forensic_frame(input);
+            output.copy_from_slice(forensic.as_raw());
+        } else {
+            self.isp.config = self.config.clone();
+            self.isp.process_frame_into(input, output);
         }
-        let enhanced = self.process_frame(input);
-        output.copy_from_slice(enhanced.as_raw());
     }
 
     fn process_frame(&mut self, input: &RgbImage) -> RgbImage {
@@ -270,6 +299,7 @@ impl FrameProcessor for NightVisionPipeline {
 
     fn set_display_mode(&mut self, mode: DisplayMode) {
         self.config.mode = mode;
+        self.isp.set_display_mode(mode);
     }
 
     fn display_mode(&self) -> DisplayMode {
@@ -277,7 +307,11 @@ impl FrameProcessor for NightVisionPipeline {
     }
 
     fn backend_name(&self) -> &'static str {
-        "Desktop Multi-Core Rayon (f32 FPU)"
+        if self.config.enable_retinex {
+            "Desktop Offline Forensic Engine (Logarithmic MSRCR FPU)"
+        } else {
+            "Desktop SOTA Physics Engine (Physics-Gated Planar FPU)"
+        }
     }
 }
 

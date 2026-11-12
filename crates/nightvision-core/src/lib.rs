@@ -121,7 +121,7 @@ mod tests {
         let test_scene = generate_synthetic_test_scene(160, 120);
         let mut processor = NightVisionPipeline::new(PipelineConfig::default());
 
-        assert_eq!(processor.backend_name(), "Desktop Multi-Core Rayon (f32 FPU)");
+        assert_eq!(processor.backend_name(), "Desktop SOTA Physics Engine (Physics-Gated Planar FPU)");
 
         processor.set_display_mode(DisplayMode::TacticalGreenPhosphor);
         assert_eq!(processor.display_mode(), DisplayMode::TacticalGreenPhosphor);
@@ -141,7 +141,7 @@ mod tests {
         let test_scene = generate_synthetic_test_scene(160, 120);
         let mut isp = ImageSignalProcessor::new(PipelineConfig::fast_realtime());
 
-        assert_eq!(isp.backend_name(), "Desktop Deep ISP (Planar Zero-Alloc FPU)");
+        assert_eq!(isp.backend_name(), "Desktop Deep ISP (Physics-Gated Planar FPU)");
 
         isp.set_display_mode(DisplayMode::TacticalWhitePhosphor);
         assert_eq!(isp.display_mode(), DisplayMode::TacticalWhitePhosphor);

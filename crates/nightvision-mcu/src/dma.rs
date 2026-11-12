@@ -79,3 +79,4 @@ impl<const WIDTH: usize> DmaPingPongBuffer<WIDTH> {
         filter_line_deterministic(top_line, mid_line, bot_line, out_line, noise_lut);
     }
 }
+

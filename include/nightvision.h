@@ -102,3 +102,4 @@ const char* nightvision_version(void);
 #endif
 
 #endif /* NIGHTVISION_H */
+
