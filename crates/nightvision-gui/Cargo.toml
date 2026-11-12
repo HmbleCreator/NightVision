@@ -1,0 +1,12 @@
+[package]
+name = "nightvision-gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Real-time desktop GUI viewer and interactive simulator for digital night vision"
+
+[dependencies]
+nightvision-core = { path = "../nightvision-core" }
+eframe = "0.29"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

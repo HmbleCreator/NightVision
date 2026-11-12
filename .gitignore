@@ -1,0 +1,16 @@
+# Git ignore for NightVision project
+/target
+Cargo.lock
+*.log
+.vscode/
+.idea/
+
+# Python / uv artifacts
+python/.venv/
+python/**/__pycache__/
+python/*.egg-info/
+python/.pytest_cache/
+
+# Output directories
+output/
+demo_results/

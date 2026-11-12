@@ -1,0 +1,13 @@
+[package]
+name = "nightvision-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CLI tool and benchmarking suite for digital night vision processing"
+
+[dependencies]
+nightvision-core = { path = "../nightvision-core" }
+clap = { version = "4.5", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+indicatif = "0.17"
