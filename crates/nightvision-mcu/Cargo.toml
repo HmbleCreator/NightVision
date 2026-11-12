@@ -1,0 +1,11 @@
+[package]
+name = "nightvision-mcu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Embedded real-time NightVision ISP engine for microcontrollers (ESP32-S3, STM32H7, RP2040)"
+
+[dependencies]
+nightvision-core = { path = "../nightvision-core" }
+image = { version = "0.25", default-features = false, features = ["png"] }

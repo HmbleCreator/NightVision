@@ -4,6 +4,7 @@ members = [
     "crates/nightvision-core",
     "crates/nightvision-cli",
     "crates/nightvision-gui",
+    "crates/nightvision-mcu",
 ]
 
 [workspace.package]
