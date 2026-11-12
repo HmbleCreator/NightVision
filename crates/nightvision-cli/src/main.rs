@@ -88,6 +88,21 @@ enum Commands {
         #[arg(short, long, default_value = "output/demo")]
         output_dir: PathBuf,
     },
+
+    /// Comprehensive evaluation and testing of real-world low-light images
+    TestImages {
+        /// Directory containing test images
+        #[arg(short, long, default_value = "LowLightTestImages")]
+        input_dir: PathBuf,
+
+        /// Output directory for enhanced images and side-by-side comparisons
+        #[arg(short, long, default_value = "output/test_results")]
+        output_dir: PathBuf,
+
+        /// Benchmark timing iterations per image
+        #[arg(long, default_value_t = 10)]
+        benchmark_iterations: usize,
+    },
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
@@ -154,6 +169,112 @@ fn create_side_by_side(images: &[(&str, &RgbImage)]) -> RgbImage {
     }
 
     canvas
+}
+
+#[derive(serde::Serialize)]
+struct ImageEvaluationResult {
+    file_name: String,
+    width: u32,
+    height: u32,
+    raw_mean_luma: f64,
+    raw_min: u8,
+    raw_max: u8,
+    raw_entropy: f64,
+    raw_laplacian_var: f64,
+    desktop_latency_ms: f64,
+    desktop_fps: f64,
+    desktop_mean_luma: f64,
+    desktop_min: u8,
+    desktop_max: u8,
+    desktop_entropy: f64,
+    desktop_laplacian_var: f64,
+    mcu_latency_ms: f64,
+    mcu_fps: f64,
+    mcu_mean_luma: f64,
+    mcu_min: u8,
+    mcu_max: u8,
+    mcu_entropy: f64,
+    mcu_laplacian_var: f64,
+    speedup_factor: f64,
+    mcu_vs_desktop_psnr: f64,
+    mcu_vs_desktop_ssim: f64,
+}
+
+fn calculate_entropy(img: &RgbImage) -> f64 {
+    let mut hist = [0u32; 256];
+    let total = (img.width() * img.height()) as f64;
+    if total == 0.0 {
+        return 0.0;
+    }
+    for p in img.pixels() {
+        let y = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8) as usize;
+        hist[y.min(255)] += 1;
+    }
+    let mut entropy = 0.0f64;
+    for &count in &hist {
+        if count > 0 {
+            let p = (count as f64) / total;
+            entropy -= p * p.log2();
+        }
+    }
+    entropy
+}
+
+fn calculate_laplacian_variance(img: &RgbImage) -> f64 {
+    let (w, h) = img.dimensions();
+    if w < 3 || h < 3 {
+        return 0.0;
+    }
+    let w_u = w as usize;
+    let h_u = h as usize;
+    let mut luma = Vec::with_capacity(w_u * h_u);
+    for p in img.pixels() {
+        let y = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8) as f64;
+        luma.push(y);
+    }
+    let mut laps = Vec::with_capacity((w_u - 2) * (h_u - 2));
+    for y in 1..h_u - 1 {
+        for x in 1..w_u - 1 {
+            let c = luma[y * w_u + x];
+            let top = luma[(y - 1) * w_u + x];
+            let bot = luma[(y + 1) * w_u + x];
+            let left = luma[y * w_u + (x - 1)];
+            let right = luma[y * w_u + (x + 1)];
+            let lap = top + bot + left + right - 4.0 * c;
+            laps.push(lap);
+        }
+    }
+    let n = laps.len() as f64;
+    let mean = laps.iter().sum::<f64>() / n;
+    laps.iter().map(|&v| (v - mean) * (v - mean)).sum::<f64>() / n
+}
+
+fn calculate_mean_luma(img: &RgbImage) -> f64 {
+    let mut sum = 0u64;
+    let total = (img.width() * img.height()) as f64;
+    if total == 0.0 {
+        return 0.0;
+    }
+    for p in img.pixels() {
+        let y = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8) as u64;
+        sum += y;
+    }
+    (sum as f64) / total
+}
+
+fn calculate_min_max_luma(img: &RgbImage) -> (u8, u8) {
+    let mut min_val = 255u8;
+    let mut max_val = 0u8;
+    for p in img.pixels() {
+        let y = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8) as u8;
+        if y < min_val {
+            min_val = y;
+        }
+        if y > max_val {
+            max_val = y;
+        }
+    }
+    (min_val, max_val)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -311,8 +432,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Box::new(NightVisionPipeline::new(config))
                 }
                 BackendArg::Mcu => {
-                    let mut config = McuEngineConfig::default();
-                    config.display_mode = mode.into();
+                    let config = McuEngineConfig::default().with_mode(mode.into());
                     Box::new(McuDynamicProcessor::new(config))
                 }
             };
@@ -504,6 +624,208 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let out_path = output_dir.join("05_mcu_vs_desktop_comparison.png");
             sbs.save(&out_path)?;
             println!(" -> Saved MCU vs Desktop comparison artifact: {}", out_path.display());
+        }
+
+        Commands::TestImages {
+            input_dir,
+            output_dir,
+            benchmark_iterations,
+        } => {
+            println!("╔════════════════════════════════════════════════════════════════════════════════╗");
+            println!("║              NIGHTVISION REAL-WORLD LOW-LIGHT TEST BENCHMARK                   ║");
+            println!("╚════════════════════════════════════════════════════════════════════════════════╝");
+            println!();
+
+            fs::create_dir_all(&output_dir)?;
+
+            let mut entries: Vec<PathBuf> = fs::read_dir(&input_dir)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                        let ext = ext.to_lowercase();
+                        ext == "png" || ext == "jpg" || ext == "jpeg"
+                    } else {
+                        false
+                    }
+                })
+                .collect();
+
+            entries.sort();
+
+            if entries.is_empty() {
+                println!("No test images found in directory: {}", input_dir.display());
+                return Ok(());
+            }
+
+            println!("Found {} real-world low-light test images in {}.", entries.len(), input_dir.display());
+            println!("Benchmarking Desktop FPU vs MCU Streaming Engine ({} iterations per image)...", benchmark_iterations);
+            println!();
+
+            let mut results = Vec::new();
+
+            for path in &entries {
+                let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                println!("Testing Image: {file_name}");
+                println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+                let raw_img = image::open(path)?.to_rgb8();
+                let (w, h) = raw_img.dimensions();
+
+                let raw_mean = calculate_mean_luma(&raw_img);
+                let (raw_min, raw_max) = calculate_min_max_luma(&raw_img);
+                let raw_entropy = calculate_entropy(&raw_img);
+                let raw_lap = calculate_laplacian_variance(&raw_img);
+
+                println!("  [Raw Input] Resolution: {}x{} | Luma Range: [{}..{}] | Mean: {:.2} | Entropy: {:.3} bits | Laplacian Var: {:.2}",
+                    w, h, raw_min, raw_max, raw_mean, raw_entropy, raw_lap);
+
+                // --- 1. Desktop FPU Pipeline ---
+                let mut desktop_config = PipelineConfig::default();
+                desktop_config.mode = DisplayMode::FullColor;
+                desktop_config.enhancement.exposure_gain = 2.8;
+                desktop_config.enhancement.gamma = 0.60;
+                let mut desktop_proc = NightVisionPipeline::new(desktop_config);
+
+                // Warm up
+                let _ = desktop_proc.process_frame(&raw_img);
+
+                let start_desktop = Instant::now();
+                let mut desktop_color = raw_img.clone();
+                for _ in 0..benchmark_iterations.max(1) {
+                    desktop_color = desktop_proc.process_frame(&raw_img);
+                }
+                let desktop_elapsed_ms = (start_desktop.elapsed().as_secs_f64() * 1000.0) / (benchmark_iterations.max(1) as f64);
+                let desktop_fps = 1000.0 / desktop_elapsed_ms;
+
+                desktop_proc.set_display_mode(DisplayMode::TacticalWhitePhosphor);
+                let desktop_white = desktop_proc.process_frame(&raw_img);
+
+                desktop_proc.set_display_mode(DisplayMode::TacticalGreenPhosphor);
+                let desktop_green = desktop_proc.process_frame(&raw_img);
+
+                let desktop_mean = calculate_mean_luma(&desktop_color);
+                let (desktop_min, desktop_max) = calculate_min_max_luma(&desktop_color);
+                let desktop_entropy = calculate_entropy(&desktop_color);
+                let desktop_lap = calculate_laplacian_variance(&desktop_color);
+
+                println!("  [Desktop FPU] Latency: {:>6.2} ms ({:>5.1} FPS) | Mean: {:>5.2} | Range: [{}..{}] | Entropy: {:.3} bits | Laplacian: {:.2}",
+                    desktop_elapsed_ms, desktop_fps, desktop_mean, desktop_min, desktop_max, desktop_entropy, desktop_lap);
+
+                // --- 2. MCU Streaming Engine ---
+                let mcu_config = McuEngineConfig::default().with_mode(DisplayMode::FullColor);
+                let mut mcu_proc = McuDynamicProcessor::new(mcu_config);
+
+                // Warm up
+                let _ = mcu_proc.process_frame(&raw_img);
+
+                let start_mcu = Instant::now();
+                let mut mcu_color = raw_img.clone();
+                for _ in 0..benchmark_iterations.max(1) {
+                    mcu_color = mcu_proc.process_frame(&raw_img);
+                }
+                let mcu_elapsed_ms = (start_mcu.elapsed().as_secs_f64() * 1000.0) / (benchmark_iterations.max(1) as f64);
+                let mcu_fps = 1000.0 / mcu_elapsed_ms;
+
+                mcu_proc.set_display_mode(DisplayMode::TacticalWhitePhosphor);
+                let mcu_white = mcu_proc.process_frame(&raw_img);
+
+                mcu_proc.set_display_mode(DisplayMode::TacticalGreenPhosphor);
+                let mcu_green = mcu_proc.process_frame(&raw_img);
+
+                let mcu_mean = calculate_mean_luma(&mcu_color);
+                let (mcu_min, mcu_max) = calculate_min_max_luma(&mcu_color);
+                let mcu_entropy = calculate_entropy(&mcu_color);
+                let mcu_lap = calculate_laplacian_variance(&mcu_color);
+
+                let speedup = desktop_elapsed_ms / mcu_elapsed_ms;
+                let mcu_vs_desktop_psnr = calculate_psnr(&desktop_color, &mcu_color);
+                let mcu_vs_desktop_ssim = calculate_ssim(&desktop_color, &mcu_color);
+
+                println!("  [MCU Stream ] Latency: {:>6.2} ms ({:>5.1} FPS) | Mean: {:>5.2} | Range: [{}..{}] | Entropy: {:.3} bits | Speedup: {:>5.1}x",
+                    mcu_elapsed_ms, mcu_fps, mcu_mean, mcu_min, mcu_max, mcu_entropy, speedup);
+                println!("  [Fidelity   ] MCU vs Desktop: PSNR: {:.2} dB | SSIM: {:.4}", mcu_vs_desktop_psnr, mcu_vs_desktop_ssim);
+
+                // Save individual enhanced images
+                let img_out_dir = output_dir.join(&stem);
+                fs::create_dir_all(&img_out_dir)?;
+
+                raw_img.save(img_out_dir.join("01_raw.png"))?;
+                desktop_color.save(img_out_dir.join("02_desktop_color.png"))?;
+                desktop_white.save(img_out_dir.join("03_desktop_white_phosphor.png"))?;
+                desktop_green.save(img_out_dir.join("04_desktop_green_phosphor.png"))?;
+                mcu_color.save(img_out_dir.join("05_mcu_color.png"))?;
+                mcu_white.save(img_out_dir.join("06_mcu_white_phosphor.png"))?;
+                mcu_green.save(img_out_dir.join("07_mcu_green_phosphor.png"))?;
+
+                // Generate 5-panel composite comparison
+                let composite = [
+                    ("Raw Input", &raw_img),
+                    ("Desktop Color", &desktop_color),
+                    ("MCU Color", &mcu_color),
+                    ("Desktop White", &desktop_white),
+                    ("MCU White", &mcu_white),
+                ];
+                let sbs = create_side_by_side(&composite);
+                let sbs_path = output_dir.join(format!("{stem}_comparison.png"));
+                sbs.save(&sbs_path)?;
+                println!("  -> Saved side-by-side comparison: {}", sbs_path.display());
+
+                results.push(ImageEvaluationResult {
+                    file_name,
+                    width: w,
+                    height: h,
+                    raw_mean_luma: raw_mean,
+                    raw_min,
+                    raw_max,
+                    raw_entropy,
+                    raw_laplacian_var: raw_lap,
+                    desktop_latency_ms: desktop_elapsed_ms,
+                    desktop_fps,
+                    desktop_mean_luma: desktop_mean,
+                    desktop_min,
+                    desktop_max,
+                    desktop_entropy,
+                    desktop_laplacian_var: desktop_lap,
+                    mcu_latency_ms: mcu_elapsed_ms,
+                    mcu_fps,
+                    mcu_mean_luma: mcu_mean,
+                    mcu_min,
+                    mcu_max,
+                    mcu_entropy,
+                    mcu_laplacian_var: mcu_lap,
+                    speedup_factor: speedup,
+                    mcu_vs_desktop_psnr,
+                    mcu_vs_desktop_ssim,
+                });
+            }
+
+            // Print summary table
+            println!();
+            println!("╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗");
+            println!("║                                                         LOW-LIGHT TEST SUITE BENCHMARK SUMMARY                                                                 ║");
+            println!("╠══════════════════╦═════════════╦══════════════════════════╦══════════════════════════╦══════════════════════════╦══════════════╦══════════════════╦═════════════════╣");
+            println!("║ Image File       │ Resolution  │ Raw Luma (Mean [Min..Max)│ Desktop Latency / FPS    │ MCU Latency / FPS        │ MCU Speedup  │ Mean Bright Boost│ Entropy Gain    ║");
+            println!("╠══════════════════╬═════════════╬══════════════════════════╬══════════════════════════╬══════════════════════════╬══════════════╬══════════════════╬═════════════════╣");
+            for r in &results {
+                let raw_str = format!("{:.1} [{}..{}]", r.raw_mean_luma, r.raw_min, r.raw_max);
+                let desk_str = format!("{:.1} ms ({:.0} FPS)", r.desktop_latency_ms, r.desktop_fps);
+                let mcu_str = format!("{:.2} ms ({:.0} FPS)", r.mcu_latency_ms, r.mcu_fps);
+                let boost_str = format!("{:.1}x", r.mcu_mean_luma / r.raw_mean_luma.max(0.1));
+                let ent_str = format!("+{:.2} bits", r.mcu_entropy - r.raw_entropy);
+                println!("║ {:<16} │ {:>5}x{:<5} │ {:<24} │ {:<24} │ {:<24} │ {:>10.1}x  │ {:>16} │ {:>15} ║",
+                    r.file_name, r.width, r.height, raw_str, desk_str, mcu_str, r.speedup_factor, boost_str, ent_str);
+            }
+            println!("╚══════════════════╩═════════════╩══════════════════════════╩══════════════════════════╩══════════════════════════╩══════════════╩══════════════════╩═════════════════╝");
+            println!();
+
+            // Export JSON
+            let json_path = output_dir.join("metrics_summary.json");
+            fs::write(&json_path, serde_json::to_string_pretty(&results)?)?;
+            println!("Saved complete quantitative metrics report to: {}", json_path.display());
         }
     }
 

@@ -28,3 +28,7 @@ _Avoid_: Flare guard, highlight limiter, clamp
 The recursive stateful module that integrates photon flux across consecutive temporal frames while adapting blending weights to prevent motion ghosting.
 _Avoid_: History buffer, frame blender, averager
 
+**Image Signal Processor (ISP)**:
+The deep computational engine that transforms raw sensor frames through color space conversion, edge-preserving denoising, illumination recovery, and tone mapping using pre-allocated planar scratch buffers.
+_Avoid_: Filter pipeline, image processor, graphics engine
+

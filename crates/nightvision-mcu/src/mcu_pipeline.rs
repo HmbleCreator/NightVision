@@ -38,6 +38,20 @@ impl Default for McuEngineConfig {
     }
 }
 
+impl McuEngineConfig {
+    /// Update configuration with specified tactical display mode and appropriate LUT.
+    pub fn with_mode(mut self, mode: DisplayMode) -> Self {
+        self.display_mode = mode;
+        self.phosphor_lut = match mode {
+            DisplayMode::TacticalGreenPhosphor => PhosphorLut::p43_green(),
+            DisplayMode::TacticalWhitePhosphor => PhosphorLut::p45_white(),
+            DisplayMode::HighContrastRecon => PhosphorLut::recon_amber(),
+            _ => PhosphorLut::p45_white(),
+        };
+        self
+    }
+}
+
 /// Real-Time MCU NightVision Engine with row-by-row streaming.
 pub struct McuNightVisionEngine<const WIDTH: usize, const HEIGHT: usize> {
     pub config: McuEngineConfig,
@@ -117,7 +131,18 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
                     };
 
                     let tone_mapped = self.config.autogating_lut.lookup(contrast_val);
-                    let rgb = self.config.phosphor_lut.map_rgb(tone_mapped);
+                    let rgb = if self.config.display_mode == DisplayMode::FullColor {
+                        let p = input_frame.get_pixel(x as u32, out_y);
+                        let raw_y = (mid[x] as u32).max(1);
+                        let ratio_q8 = ((tone_mapped as u32) << 8) / raw_y;
+                        [
+                            (((p[0] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                            (((p[1] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                            (((p[2] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                        ]
+                    } else {
+                        self.config.phosphor_lut.map_rgb(tone_mapped)
+                    };
                     output_frame.put_pixel(x as u32, out_y, Rgb(rgb));
                 }
             }
@@ -130,7 +155,18 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
 
             for x in 0..WIDTH {
                 let tone_mapped = self.config.autogating_lut.lookup(self.scratch_row[x]);
-                let rgb = self.config.phosphor_lut.map_rgb(tone_mapped);
+                let rgb = if self.config.display_mode == DisplayMode::FullColor {
+                    let p = input_frame.get_pixel(x as u32, last_y);
+                    let raw_y = (mid[x] as u32).max(1);
+                    let ratio_q8 = ((tone_mapped as u32) << 8) / raw_y;
+                    [
+                        (((p[0] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                        (((p[1] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                        (((p[2] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                    ]
+                } else {
+                    self.config.phosphor_lut.map_rgb(tone_mapped)
+                };
                 output_frame.put_pixel(x as u32, last_y, Rgb(rgb));
             }
         }
@@ -283,7 +319,18 @@ impl FrameProcessor for McuDynamicProcessor {
                         filtered
                     };
                     let tone_mapped = self.config.autogating_lut.lookup(contrast);
-                    let rgb = self.config.phosphor_lut.map_rgb(tone_mapped);
+                    let rgb = if self.config.display_mode == DisplayMode::FullColor {
+                        let p = input.get_pixel(x as u32, out_y);
+                        let raw_y = (mid[x] as u32).max(1);
+                        let ratio_q8 = ((tone_mapped as u32) << 8) / raw_y;
+                        [
+                            (((p[0] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                            (((p[1] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                            (((p[2] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                        ]
+                    } else {
+                        self.config.phosphor_lut.map_rgb(tone_mapped)
+                    };
                     output.put_pixel(x as u32, out_y, Rgb(rgb));
                 }
             }
@@ -301,7 +348,18 @@ impl FrameProcessor for McuDynamicProcessor {
 
             for x in 0..w {
                 let tone_mapped = self.config.autogating_lut.lookup(self.scratch_row[x]);
-                let rgb = self.config.phosphor_lut.map_rgb(tone_mapped);
+                let rgb = if self.config.display_mode == DisplayMode::FullColor {
+                    let p = input.get_pixel(x as u32, last_y);
+                    let raw_y = (mid[x] as u32).max(1);
+                    let ratio_q8 = ((tone_mapped as u32) << 8) / raw_y;
+                    [
+                        (((p[0] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                        (((p[1] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                        (((p[2] as u32 * ratio_q8) >> 8).min(255)) as u8,
+                    ]
+                } else {
+                    self.config.phosphor_lut.map_rgb(tone_mapped)
+                };
                 output.put_pixel(x as u32, last_y, Rgb(rgb));
             }
         }

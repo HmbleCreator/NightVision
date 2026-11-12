@@ -284,7 +284,11 @@ pub fn apply_exposure_and_autogating(
     };
 
     let effective_gain = exposure_gain * flare_attenuation;
-    let inv_gamma = 1.0 / gamma.clamp(0.1, 2.0);
+    let gamma_exp = if gamma > 0.0 && gamma < 1.0 {
+        gamma
+    } else {
+        1.0 / gamma.clamp(0.1, 2.0)
+    };
 
     let out_slice = out_img.as_flat_samples_mut();
     let out_bytes = out_slice.samples;
@@ -296,7 +300,7 @@ pub fn apply_exposure_and_autogating(
             for c in 0..3 {
                 let normalized = (in_p[c] as f32) / 255.0;
                 let boosted = normalized * effective_gain;
-                let tone_mapped = boosted.powf(inv_gamma);
+                let tone_mapped = boosted.powf(gamma_exp);
                 let compressed = tone_mapped / (1.0 + tone_mapped * 0.4);
                 out_p[c] = (compressed * 255.0).round().clamp(0.0, 255.0) as u8;
             }

@@ -33,3 +33,4 @@ pub trait FrameProcessor {
     /// Human-readable name of the backend engine (e.g. "Desktop Rayon FPU", "MCU Fixed-Point Streaming").
     fn backend_name(&self) -> &'static str;
 }
+

@@ -16,7 +16,12 @@ impl AutoGatingLut {
     /// Generates LUT based on sensor gain, gamma curve, and flare auto-gating threshold.
     pub fn new(gain: f32, gamma: f32, auto_gating_threshold: f32) -> Self {
         let mut table = [0u8; 256];
-        let inv_gamma = 1.0 / gamma.clamp(0.2, 2.0);
+        // In low-light tone-mapping, gamma exponent < 1.0 lifts deep shadows
+        let gamma_exp = if gamma > 0.0 && gamma < 1.0 {
+            gamma
+        } else {
+            1.0 / gamma.clamp(0.1, 2.0)
+        };
 
         for i in 0..256 {
             let norm = (i as f32) / 255.0;
@@ -25,7 +30,7 @@ impl AutoGatingLut {
             let boosted = norm * gain;
 
             // 2. Adaptive gamma expansion (lifts deep shadow details)
-            let gamma_lift = boosted.powf(inv_gamma);
+            let gamma_lift = boosted.powf(gamma_exp);
 
             // 3. Digital Auto-Gating: Soft-knee Reinhard compression
             // Clamps headlights / muzzle flashes smoothly without blowing out highlights
@@ -84,7 +89,7 @@ impl PhosphorLut {
 
         for i in 0..256 {
             let y = (i as f32) / 255.0;
-            let s_curve = (y * 1.06 - 0.03).clamp(0.0, 1.0) * 255.0;
+            let s_curve = y * 255.0;
 
             lut_r[i] = (s_curve * 0.95).round() as u8;
             lut_g[i] = (s_curve * 0.98).round() as u8;
