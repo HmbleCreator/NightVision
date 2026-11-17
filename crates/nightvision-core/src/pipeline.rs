@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::enhancement::{
     apply_clahe, apply_exposure_and_autogating, apply_retinex, EnhancementConfig,
 };
+use crate::highlight_recovery::HighlightConfig;
 use crate::isp::ImageSignalProcessor;
 use crate::modes::{render_mode, DisplayMode};
+use crate::optical_bloom::BloomConfig;
 use crate::processor::FrameProcessor;
 use crate::spatial::{denoise_image, SpatialDenoiseConfig};
 use crate::temporal::{AdaptiveTemporalAccumulator, TemporalConfig};
@@ -23,10 +25,14 @@ pub struct PipelineConfig {
     pub enhancement: EnhancementConfig,
     pub mode: DisplayMode,
     pub saturation_boost: f32,
+    pub highlight: HighlightConfig,
+    pub bloom: BloomConfig,
     pub enable_temporal: bool,
     pub enable_spatial: bool,
     pub enable_retinex: bool,
     pub enable_clahe: bool,
+    pub enable_highlight_recovery: bool,
+    pub enable_optical_bloom: bool,
 }
 
 impl Default for PipelineConfig {
@@ -37,10 +43,14 @@ impl Default for PipelineConfig {
             enhancement: EnhancementConfig::default(),
             mode: DisplayMode::FullColor,
             saturation_boost: 1.35,
+            highlight: HighlightConfig::default(),
+            bloom: BloomConfig::default(),
             enable_temporal: true,
             enable_spatial: true,
             enable_retinex: false, // Default is false: SOTA Physics Engine is primary!
             enable_clahe: false,   // Default is false: Continuous Hermite Knee replaces blind CLAHE
+            enable_highlight_recovery: true,
+            enable_optical_bloom: true,
         }
     }
 }
@@ -72,10 +82,14 @@ impl PipelineConfig {
             },
             mode: DisplayMode::TacticalWhitePhosphor,
             saturation_boost: 1.0,
+            highlight: HighlightConfig::default(),
+            bloom: BloomConfig::default(),
             enable_temporal: true,
             enable_spatial: true,
             enable_retinex: false,
             enable_clahe: true,
+            enable_highlight_recovery: true,
+            enable_optical_bloom: true,
         }
     }
 }

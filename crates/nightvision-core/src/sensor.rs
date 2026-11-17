@@ -312,6 +312,85 @@ impl ExposureMeteringReport {
             recommended_ev_shift,
         }
     }
+
+    /// Computes the closed-loop hardware sensor AEC command for the CMOS sensor driver.
+    /// When clipped_pixel_ratio > 0.02 (2% of sensor photodiodes saturated), immediately
+    /// reduces shutter integration time and analog gain to prevent highlight blowout in frame N+1.
+    pub fn to_sensor_command(&self) -> AecSensorCommand {
+        AecSensorCommand::from_report(self)
+    }
 }
+
+/// Closed-loop hardware sensor Auto-Exposure Control (AEC) command.
+///
+/// Designed for low-latency transmission over I2C/SPI to the camera CMOS sensor register bank.
+/// In drone/robotics flight stacks, triggers exposure step-down within < 5 ms when photodiode
+/// saturation is detected.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AecSensorCommand {
+    /// Multiplicative factor to scale current sensor electronic shutter integration time
+    /// (e.g. 0.25 = reduce exposure from 1/30s to 1/120s, a -2.0 EV drop).
+    pub target_shutter_scale: f32,
+    /// Target analog gain adjustment in decibels (dB) (e.g. -6.0 dB = halve sensor analog amplifier gain).
+    pub target_analog_gain_db: f32,
+    /// Fraction of pixels reaching full photodiode saturation (250..255 ADU).
+    pub clipped_pixel_ratio: f32,
+}
+
+impl Default for AecSensorCommand {
+    fn default() -> Self {
+        Self {
+            target_shutter_scale: 1.0,
+            target_analog_gain_db: 0.0,
+            clipped_pixel_ratio: 0.0,
+        }
+    }
+}
+
+impl AecSensorCommand {
+    /// Translates an exposure metering telemetry report into physical sensor hardware register adjustments.
+    pub fn from_report(report: &ExposureMeteringReport) -> Self {
+        let clipped = report.saturated_pixel_fraction;
+        if clipped > 0.30 || (report.mean_luma >= 254.0 && report.p95_luma >= 254.0) {
+            // Full saturation ceiling: aggressive exposure drop (-6.0 EV equivalent)
+            Self {
+                target_shutter_scale: 0.015625, // 2^(-6) = 1/64x shutter
+                target_analog_gain_db: -18.0,
+                clipped_pixel_ratio: clipped,
+            }
+        } else if clipped > 0.02 || report.mean_luma > 170.0 {
+            // High exposure / veiling glare: immediate shutter pull-down
+            let ev_drop = if clipped > 0.08 { 4.0 } else { 2.0 };
+            let shutter_scale = 2.0f32.powf(-ev_drop);
+            Self {
+                target_shutter_scale: shutter_scale,
+                target_analog_gain_db: -6.0 * (ev_drop / 2.0),
+                clipped_pixel_ratio: clipped,
+            }
+        } else if report.mean_luma < 8.0 {
+            // Ultra-dark: boost integration time and analog gain (+3.0 to +4.0 EV)
+            Self {
+                target_shutter_scale: 2.0,
+                target_analog_gain_db: 18.0,
+                clipped_pixel_ratio: clipped,
+            }
+        } else if report.mean_luma <= 45.0 {
+            // Low light: moderate gain boost
+            Self {
+                target_shutter_scale: 1.25,
+                target_analog_gain_db: 6.0,
+                clipped_pixel_ratio: clipped,
+            }
+        } else {
+            // Normal daylight: unity
+            Self {
+                target_shutter_scale: 1.0,
+                target_analog_gain_db: 0.0,
+                clipped_pixel_ratio: clipped,
+            }
+        }
+    }
+}
+
 
 

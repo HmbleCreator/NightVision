@@ -97,7 +97,14 @@ impl AutoGatingLut {
                     }
                 } else {
                     let t = ((x - haze_floor) / (255.0 - haze_floor)).clamp(0.0, 1.0);
-                    toe_max + (255.0 - toe_max) * t.powf(3.2)
+                    // C¹-continuous Hermite highlight shoulder strictly anchoring at 255 ADU
+                    let t_film = if t < 0.70 {
+                        t
+                    } else {
+                        let u = (t - 0.70) / 0.30;
+                        0.70 + 0.30 * (u * (1.0 + u - u * u))
+                    };
+                    toe_max + (255.0 - toe_max) * t_film
                 };
                 table[i] = val.round().clamp(0.0, 255.0) as u8;
             }

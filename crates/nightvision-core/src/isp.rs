@@ -14,7 +14,9 @@ use image::{ImageBuffer, RgbImage};
 use rayon::prelude::*;
 use std::time::Instant;
 
+use crate::highlight_recovery::{recover_highlights_planar, HighlightScratch};
 use crate::modes::DisplayMode;
+use crate::optical_bloom::{inject_optical_bloom_planar, BloomScratch};
 use crate::pipeline::{PipelineConfig, StageBreakdown};
 use crate::processor::FrameProcessor;
 use crate::sensor::ExposureMeteringReport;
@@ -41,6 +43,10 @@ pub struct ImageSignalProcessor {
     temporal_luma_prev: Vec<f32>,
     frame_count: usize,
 
+    // Highlight recovery & bloom scratch buffers (< 0 bytes allocated during steady-state)
+    highlight_scratch: HighlightScratch,
+    bloom_scratch: BloomScratch,
+
     // Auto-exposure scene luminance tracking with 16-frame EMA & deadband hysteresis
     smoothed_luma: f32,
     applied_knee_luma: f32,
@@ -65,6 +71,8 @@ impl ImageSignalProcessor {
             temporal_history_rgb: Vec::new(),
             temporal_luma_prev: Vec::new(),
             frame_count: 0,
+            highlight_scratch: HighlightScratch::default(),
+            bloom_scratch: BloomScratch::default(),
             smoothed_luma: 16.0,
             applied_knee_luma: 16.0,
             last_exposure_report: ExposureMeteringReport::default(),
@@ -108,6 +116,8 @@ impl ImageSignalProcessor {
 
         self.temporal_history_rgb.resize(n, [0.0; 3]);
         self.temporal_luma_prev.resize(n, 0.0);
+        self.highlight_scratch.ensure_capacity(n);
+        self.bloom_scratch.ensure_capacity(n);
         self.frame_count = 0;
         self.smoothed_luma = 16.0;
         self.applied_knee_luma = 16.0;
@@ -126,18 +136,45 @@ impl ImageSignalProcessor {
             *output = ImageBuffer::new(w_u32, h_u32);
         }
 
-        let is_high_exposure = self.check_high_exposure(input, w, h);
+        let is_high_exposure_initial = self.check_high_exposure(input, w, h);
 
         // Stage 1: Ingestion & Adaptive Temporal Accumulation (directly into planar YCbCr)
-        self.execute_temporal_and_planar_conversion(input, w, h, is_high_exposure);
+        self.execute_temporal_and_planar_conversion(input, w, h, is_high_exposure_initial);
+
+        // Stage 1.5: Meter true sensor exposure telemetry BEFORE non-linear tone operations
+        let (is_ultra_dark, is_high_exposure, effective_scene_luma_adu) = self.compute_scene_telemetry(w, h);
 
         // Stage 2: Physics-Gated Guided Spatial Denoising & Luminance Unsharp Masking
         if self.config.enable_spatial {
             self.execute_guided_spatial_filter(w, h, is_high_exposure);
         }
 
+        // Stage 2.5: Physical Highlight Recovery & Contrast-Gated Optical Bloom
+        if is_high_exposure {
+            if self.config.enable_highlight_recovery {
+                recover_highlights_planar(
+                    &mut self.y_plane,
+                    &mut self.cb_plane,
+                    &mut self.cr_plane,
+                    &mut self.highlight_scratch,
+                    w,
+                    h,
+                    &self.config.highlight,
+                );
+            }
+            if self.config.enable_optical_bloom {
+                inject_optical_bloom_planar(
+                    &mut self.y_plane,
+                    &mut self.bloom_scratch,
+                    w,
+                    h,
+                    &self.config.bloom,
+                );
+            }
+        }
+
         // Stage 3: Fused Continuous Hermite Shadow-Knee, Reinhard Auto-Gating, Chroma Gate & Rendering
-        self.execute_fused_tone_and_render(output, w, h);
+        self.execute_fused_tone_and_render(output, w, h, is_ultra_dark, is_high_exposure, effective_scene_luma_adu);
 
         self.frame_count += 1;
     }
@@ -179,12 +216,15 @@ impl ImageSignalProcessor {
 
         let mut output = ImageBuffer::new(w_u32, h_u32);
         let total_start = Instant::now();
-        let is_high_exposure = self.check_high_exposure(input, w, h);
+        let is_high_exposure_initial = self.check_high_exposure(input, w, h);
 
         // 1. Temporal Accumulation
         let t0 = Instant::now();
-        self.execute_temporal_and_planar_conversion(input, w, h, is_high_exposure);
+        self.execute_temporal_and_planar_conversion(input, w, h, is_high_exposure_initial);
         let temporal_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        // Stage 1.5: Meter true sensor exposure telemetry BEFORE non-linear tone operations
+        let (is_ultra_dark, is_high_exposure, effective_scene_luma_adu) = self.compute_scene_telemetry(w, h);
 
         // 2. Physics-Gated Spatial Filter
         let t1 = Instant::now();
@@ -192,6 +232,30 @@ impl ImageSignalProcessor {
             self.execute_guided_spatial_filter(w, h, is_high_exposure);
         }
         let spatial_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        // Highlight Recovery & Contrast-Gated Bloom in high-exposure regime
+        if is_high_exposure {
+            if self.config.enable_highlight_recovery {
+                recover_highlights_planar(
+                    &mut self.y_plane,
+                    &mut self.cb_plane,
+                    &mut self.cr_plane,
+                    &mut self.highlight_scratch,
+                    w,
+                    h,
+                    &self.config.highlight,
+                );
+            }
+            if self.config.enable_optical_bloom {
+                inject_optical_bloom_planar(
+                    &mut self.y_plane,
+                    &mut self.bloom_scratch,
+                    w,
+                    h,
+                    &self.config.bloom,
+                );
+            }
+        }
 
         // 3. Retinex (Replaced by Hermite Shadow-Knee: 0.0 ms)
         let retinex_ms = 0.0;
@@ -201,7 +265,7 @@ impl ImageSignalProcessor {
 
         // 5 & 6. Fused Tone & Render
         let t2 = Instant::now();
-        self.execute_fused_tone_and_render(&mut output, w, h);
+        self.execute_fused_tone_and_render(&mut output, w, h, is_ultra_dark, is_high_exposure, effective_scene_luma_adu);
         let render_elapsed = t2.elapsed().as_secs_f64() * 1000.0;
         let exposure_autogating_ms = render_elapsed * 0.45;
         let mode_rendering_ms = render_elapsed * 0.55;
@@ -225,6 +289,75 @@ impl ImageSignalProcessor {
     // ─────────────────────────────────────────────────────────────────────────────
     // INTERNAL FUSED STAGES
     // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Measures raw incoming sensor luminance, histogram distribution, and photodiode saturation.
+    /// This runs directly after planar ingestion, BEFORE any non-linear tone operations or highlight recovery,
+    /// ensuring hardware AEC and exposure telemetry reflect true physical sensor energy.
+    fn compute_scene_telemetry(&mut self, w: usize, h: usize) -> (bool, bool, f32) {
+        let n = w * h;
+        let (sum_luma, sat_count, hist) = self
+            .y_plane
+            .par_chunks(2048)
+            .map(|chunk| {
+                let mut s = 0.0f32;
+                let mut sat = 0usize;
+                let mut h = [0usize; 16];
+                for &y in chunk {
+                    s += y;
+                    let bin = ((y * 15.99).floor() as usize).min(15);
+                    h[bin] += 1;
+                    if y >= (250.0 / 255.0) {
+                        sat += 1;
+                    }
+                }
+                (s, sat, h)
+            })
+            .reduce(
+                || (0.0, 0, [0usize; 16]),
+                |(s1, sat1, h1), (s2, sat2, h2)| {
+                    let mut h = [0usize; 16];
+                    for i in 0..16 {
+                        h[i] = h1[i] + h2[i];
+                    }
+                    (s1 + s2, sat1 + sat2, h)
+                },
+            );
+
+        let current_mean_adu = (sum_luma / (n as f32).max(1.0)) * 255.0;
+        let sat_fraction = (sat_count as f32) / (n as f32).max(1.0);
+
+        let target_p95 = (n as f32 * 0.95) as usize;
+        let mut cum = 0usize;
+        let mut p95_bin = 15usize;
+        for (bin, &count) in hist.iter().enumerate() {
+            cum += count;
+            if cum >= target_p95 {
+                p95_bin = bin;
+                break;
+            }
+        }
+        let p95_luma_adu = (p95_bin as f32 * 16.0 + 8.0).min(255.0);
+
+        let report = ExposureMeteringReport::compute(current_mean_adu, p95_luma_adu, sat_fraction);
+        self.last_exposure_report = report;
+
+        let smoothed_adu = if self.frame_count == 0 {
+            current_mean_adu
+        } else {
+            (current_mean_adu + 15.0 * self.smoothed_luma) / 16.0
+        };
+        self.smoothed_luma = smoothed_adu;
+
+        if self.frame_count == 0 || (smoothed_adu - self.applied_knee_luma).abs() >= 0.5 {
+            self.applied_knee_luma = smoothed_adu;
+        }
+        let effective_scene_luma_adu = self.applied_knee_luma;
+
+        let is_ultra_dark = effective_scene_luma_adu < 8.0;
+        let is_high_exposure = effective_scene_luma_adu > 170.0 || p95_luma_adu > 225.0 || sat_fraction > 0.08;
+
+        (is_ultra_dark, is_high_exposure, effective_scene_luma_adu)
+    }
 
     /// Stage 1: Ingests raw RGB frame, executes adaptive temporal accumulation,
     /// and projects directly into planar Y, Cb, Cr memory in a single parallel pass.
@@ -377,77 +510,20 @@ impl ImageSignalProcessor {
     /// Stage 3: Fuses dynamic exposure boost, continuous Hermite shadow-knee lift,
     /// highlight-compression shoulder, dual chroma gating (for Y < 15 and Y > 230 ADU),
     /// Reinhard auto-gating flare suppression, and tactical display mode rendering directly into output.
-    fn execute_fused_tone_and_render(&mut self, output: &mut RgbImage, w: usize, h: usize) {
-        let n = w * h;
+    fn execute_fused_tone_and_render(
+        &mut self,
+        output: &mut RgbImage,
+        w: usize,
+        _h: usize,
+        is_ultra_dark: bool,
+        is_high_exposure: bool,
+        effective_scene_luma_adu: f32,
+    ) {
         let exposure_gain = self.config.enhancement.exposure_gain;
         let gamma = self.config.enhancement.gamma;
         let autogate_threshold = self.config.enhancement.auto_gating_threshold;
         let mode = self.config.mode;
         let sat_boost = self.config.saturation_boost;
-
-        // 1. Scene Luminance, Saturation, and 16-bin Histogram Telemetry via Parallel Rayon
-        let (sum_luma, sat_count, hist) = self
-            .y_plane
-            .par_chunks(2048)
-            .map(|chunk| {
-                let mut s = 0.0f32;
-                let mut sat = 0usize;
-                let mut h = [0usize; 16];
-                for &y in chunk {
-                    s += y;
-                    let bin = ((y * 15.99).floor() as usize).min(15);
-                    h[bin] += 1;
-                    if y >= (250.0 / 255.0) {
-                        sat += 1;
-                    }
-                }
-                (s, sat, h)
-            })
-            .reduce(
-                || (0.0, 0, [0usize; 16]),
-                |(s1, sat1, h1), (s2, sat2, h2)| {
-                    let mut h = [0usize; 16];
-                    for i in 0..16 {
-                        h[i] = h1[i] + h2[i];
-                    }
-                    (s1 + s2, sat1 + sat2, h)
-                },
-            );
-
-        let current_mean_adu = (sum_luma / (n as f32).max(1.0)) * 255.0;
-        let sat_fraction = (sat_count as f32) / (n as f32).max(1.0);
-
-        // Compute 95th percentile luminance
-        let target_p95 = (n as f32 * 0.95) as usize;
-        let mut cum = 0usize;
-        let mut p95_bin = 15usize;
-        for (bin, &count) in hist.iter().enumerate() {
-            cum += count;
-            if cum >= target_p95 {
-                p95_bin = bin;
-                break;
-            }
-        }
-        let p95_luma_adu = (p95_bin as f32 * 16.0 + 8.0).min(255.0);
-
-        let report = ExposureMeteringReport::compute(current_mean_adu, p95_luma_adu, sat_fraction);
-        self.last_exposure_report = report;
-
-        // 2. 16-frame Temporal EMA smoothing and deadband hysteresis
-        let smoothed_adu = if self.frame_count == 0 {
-            current_mean_adu
-        } else {
-            (current_mean_adu + 15.0 * self.smoothed_luma) / 16.0
-        };
-        self.smoothed_luma = smoothed_adu;
-
-        if self.frame_count == 0 || (smoothed_adu - self.applied_knee_luma).abs() >= 0.5 {
-            self.applied_knee_luma = smoothed_adu;
-        }
-        let effective_scene_luma_adu = self.applied_knee_luma;
-
-        let is_ultra_dark = effective_scene_luma_adu < 8.0;
-        let is_high_exposure = effective_scene_luma_adu > 170.0 || p95_luma_adu > 225.0 || sat_fraction > 0.08;
 
         // Dynamic Hermite Shadow-Knee Lift for ultra-dark scenes (< 8.0 ADU)
         let shadow_boost = if is_ultra_dark {
@@ -466,6 +542,7 @@ impl ImageSignalProcessor {
         let y_plane = &self.y_plane;
         let cb_plane = &self.cb_plane;
         let cr_plane = &self.cr_plane;
+        let filmic_cfg = self.config.highlight.filmic;
 
         // 3. Fused bidirectional tone curve, dual chroma gate, and display mode rendering
         output
@@ -511,7 +588,7 @@ impl ImageSignalProcessor {
                         // Full-Range Glare Dehazing Curve:
                         // 1. Optical Glare Floor Subtraction: haze_floor = clamp((mean_luma - 130.0) * 0.65, 0.0, 75.0)
                         // 2. Smooth linear toe roll-off below haze_floor (0..haze_floor -> 0..12 ADU)
-                        // 3. Monotonic concave power pull-down (gamma = 3.2), strictly anchoring f(255) = 255
+                        // 3. Monotonic C1-continuous Hermite highlight shoulder strictly anchoring at 255 ADU
                         let haze_floor_norm = (((effective_scene_luma_adu - 130.0) * 0.65).clamp(0.0, 75.0)) / 255.0;
                         let toe_max = if haze_floor_norm > (10.0 / 255.0) { 12.0 / 255.0 } else { 0.0 };
 
@@ -523,7 +600,13 @@ impl ImageSignalProcessor {
                             }
                         } else {
                             let t = ((luma - haze_floor_norm) / (1.0 - haze_floor_norm)).clamp(0.0, 1.0);
-                            toe_max + (1.0 - toe_max) * t.powf(3.2)
+                            let t_film = if t < 0.70 {
+                                t
+                            } else {
+                                let u = (t - 0.70) / 0.30;
+                                0.70 + 0.30 * (u * (1.0 + u - u * u))
+                            };
+                            toe_max + (1.0 - toe_max) * t_film
                         };
                         val.clamp(0.0, 1.0)
                     } else {
@@ -573,10 +656,19 @@ impl ImageSignalProcessor {
                             let r_f = comp + 1.402 * cr0;
                             let g_f = comp - 0.344136 * cb0 - 0.714136 * cr0;
                             let b_f = comp + 1.772 * cb0;
+                            let mut r_n = r_f.clamp(0.0, 1.0);
+                            let mut g_n = g_f.clamp(0.0, 1.0);
+                            let mut b_n = b_f.clamp(0.0, 1.0);
+                            crate::soft_knee::highlight_desaturate(
+                                &mut r_n,
+                                &mut g_n,
+                                &mut b_n,
+                                &filmic_cfg,
+                            );
                             (
-                                (r_f.clamp(0.0, 1.0) * 255.0).round() as u8,
-                                (g_f.clamp(0.0, 1.0) * 255.0).round() as u8,
-                                (b_f.clamp(0.0, 1.0) * 255.0).round() as u8,
+                                (r_n * 255.0).round() as u8,
+                                (g_n * 255.0).round() as u8,
+                                (b_n * 255.0).round() as u8,
                             )
                         }
                         DisplayMode::TacticalWhitePhosphor => {

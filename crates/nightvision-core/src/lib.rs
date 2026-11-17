@@ -9,6 +9,10 @@
 //!    edge-preserving guided denoising, Retinex reflectance recovery, and CLAHE.
 
 pub mod enhancement;
+pub mod fusion;
+pub mod highlight_recovery;
+pub mod optical_bloom;
+pub mod soft_knee;
 pub mod isp;
 pub mod metrics;
 pub mod modes;
@@ -19,17 +23,21 @@ pub mod spatial;
 pub mod temporal;
 
 pub use enhancement::{apply_clahe, apply_exposure_and_autogating, apply_retinex, EnhancementConfig};
+pub use fusion::fuse_exposure_bracket;
+pub use highlight_recovery::{recover_highlights_planar, HighlightConfig, HighlightScratch};
 pub use isp::ImageSignalProcessor;
 pub use metrics::{calculate_psnr, calculate_snr_db, calculate_ssim};
 pub use modes::{render_mode, DisplayMode};
+pub use optical_bloom::{inject_optical_bloom_planar, BloomConfig, BloomScratch};
 pub use pipeline::{NightVisionPipeline, PipelineConfig, StageBreakdown};
 pub use processor::FrameProcessor;
 #[cfg(feature = "synthetic-sim")]
 pub use sensor::CmosSensorSimulator;
 pub use sensor::{
-    CmosSensorConfig, ExposureMeteringReport, LuxLevel, SceneLightingRegime,
+    AecSensorCommand, CmosSensorConfig, ExposureMeteringReport, LuxLevel, SceneLightingRegime,
     SensorSimulationStats,
 };
+pub use soft_knee::{filmic_tonemap, highlight_desaturate, FilmicConfig};
 pub use spatial::{denoise_image, SpatialDenoiseConfig};
 pub use temporal::{AdaptiveTemporalAccumulator, TemporalConfig};
 
