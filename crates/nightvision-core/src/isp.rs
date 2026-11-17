@@ -634,16 +634,9 @@ impl ImageSignalProcessor {
                     let chroma_gate = lower_chroma_gate * upper_chroma_gate;
 
                     // Proportional chrominance scaling:
-                    // In high exposure (highlight pull-down comp < raw_luma):
-                    // Do NOT attenuate chroma. Apply 1.45x Dehaze Color Restoration Boost for 100 < Y < 248 ADU.
+                    // In high exposure: clamp chrominance gain <= 1.0x to eliminate fiery orange/red burn on neck and cheek borders.
                     let chroma_gain = if is_high_exposure {
-                        let raw_adu = raw_luma * 255.0;
-                        let boost = if raw_adu > 100.0 && raw_adu < 248.0 {
-                            1.45
-                        } else {
-                            1.0
-                        };
-                        boost * chroma_gate * sat_boost
+                        chroma_gate.min(1.0)
                     } else {
                         let luma_boost = comp / raw_luma.max(0.02);
                         luma_boost.clamp(1.0, 4.5) * chroma_gate * sat_boost

@@ -168,9 +168,12 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
             for x in 0..WIDTH {
                 let pixel = input_frame.get_pixel(x as u32, y as u32);
                 let raw_y = (((pixel[0] as u32) * 77 + (pixel[1] as u32) * 150 + (pixel[2] as u32) * 29) >> 8) as u8;
+                let max_c = pixel[0].max(pixel[1]).max(pixel[2]);
+                let min_c = pixel[0].min(pixel[1]).min(pixel[2]);
                 // Minimum-RGB dark-channel guidance in high exposure:
-                let eff_y = if is_high_exposure {
-                    let min_c = pixel[0].min(pixel[1]).min(pixel[2]);
+                // Only engage when color saturation is low (washed-out white glare, max_c - min_c < 50).
+                // Protects deeply saturated colors (e.g. blue doorframe where max_c - min_c >= 50) from luma crushing.
+                let eff_y = if is_high_exposure && (max_c - min_c) < 50 {
                     ((raw_y as u32 * 141 + min_c as u32 * 115) >> 8) as u8
                 } else {
                     raw_y
@@ -218,32 +221,19 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
                     let tone_mapped = self.config.autogating_lut.lookup(contrast_val);
                     let rgb = if self.config.display_mode == DisplayMode::FullColor {
                         let p = input_frame.get_pixel(x as u32, out_y);
-                        let raw_y = (mid[x] as u32).max(1);
+                        let true_y = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8).max(1);
                         let tm = tone_mapped as u32;
+                        let ratio_q8 = (tm << 8) / true_y;
 
-                        let (r_col, g_col, b_col) = if is_high_exposure && tm < raw_y && mid[x] > 100 && mid[x] < 248 {
-                            let r_dim = (p[0] as i32 * tm as i32) / raw_y as i32;
-                            let g_dim = (p[1] as i32 * tm as i32) / raw_y as i32;
-                            let b_dim = (p[2] as i32 * tm as i32) / raw_y as i32;
-                            let tm_i = tm as i32;
-                            (
-                                (tm_i + (((r_dim - tm_i) * 371) >> 8)).clamp(0, 255) as u32,
-                                (tm_i + (((g_dim - tm_i) * 371) >> 8)).clamp(0, 255) as u32,
-                                (tm_i + (((b_dim - tm_i) * 371) >> 8)).clamp(0, 255) as u32,
-                            )
-                        } else {
-                            let ratio_q8 = (tm << 8) / raw_y;
-                            (
-                                ((p[0] as u32 * ratio_q8) >> 8).min(255),
-                                ((p[1] as u32 * ratio_q8) >> 8).min(255),
-                                ((p[2] as u32 * ratio_q8) >> 8).min(255),
-                            )
-                        };
+                        let r_col = ((p[0] as u32 * ratio_q8) >> 8).min(255);
+                        let g_col = ((p[1] as u32 * ratio_q8) >> 8).min(255);
+                        let b_col = ((p[2] as u32 * ratio_q8) >> 8).min(255);
 
                         let raw_u8 = mid[x];
+                        let min_rgb = p[0].min(p[1]).min(p[2]);
                         let chroma_atten_q8: u32 = if raw_u8 < 16 {
                             (raw_u8 as u32) * 16
-                        } else if raw_u8 > 248 {
+                        } else if raw_u8 > 248 && min_rgb > 240 {
                             ((255 - raw_u8 as u32) * 36).min(256)
                         } else {
                             256
@@ -282,32 +272,19 @@ impl<const WIDTH: usize, const HEIGHT: usize> McuNightVisionEngine<WIDTH, HEIGHT
                 let tone_mapped = self.config.autogating_lut.lookup(contrast);
                 let rgb = if self.config.display_mode == DisplayMode::FullColor {
                     let p = input_frame.get_pixel(x as u32, last_y);
-                    let raw_y = (mid[x] as u32).max(1);
+                    let true_y = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8).max(1);
                     let tm = tone_mapped as u32;
+                    let ratio_q8 = (tm << 8) / true_y;
 
-                    let (r_col, g_col, b_col) = if is_high_exposure && tm < raw_y && mid[x] > 100 && mid[x] < 248 {
-                        let r_dim = (p[0] as i32 * tm as i32) / raw_y as i32;
-                        let g_dim = (p[1] as i32 * tm as i32) / raw_y as i32;
-                        let b_dim = (p[2] as i32 * tm as i32) / raw_y as i32;
-                        let tm_i = tm as i32;
-                        (
-                            (tm_i + (((r_dim - tm_i) * 371) >> 8)).clamp(0, 255) as u32,
-                            (tm_i + (((g_dim - tm_i) * 371) >> 8)).clamp(0, 255) as u32,
-                            (tm_i + (((b_dim - tm_i) * 371) >> 8)).clamp(0, 255) as u32,
-                        )
-                    } else {
-                        let ratio_q8 = (tm << 8) / raw_y;
-                        (
-                            ((p[0] as u32 * ratio_q8) >> 8).min(255),
-                            ((p[1] as u32 * ratio_q8) >> 8).min(255),
-                            ((p[2] as u32 * ratio_q8) >> 8).min(255),
-                        )
-                    };
+                    let r_col = ((p[0] as u32 * ratio_q8) >> 8).min(255);
+                    let g_col = ((p[1] as u32 * ratio_q8) >> 8).min(255);
+                    let b_col = ((p[2] as u32 * ratio_q8) >> 8).min(255);
 
                     let raw_u8 = mid[x];
+                    let min_rgb = p[0].min(p[1]).min(p[2]);
                     let chroma_atten_q8: u32 = if raw_u8 < 16 {
                         (raw_u8 as u32) * 16
-                    } else if raw_u8 > 248 {
+                    } else if raw_u8 > 248 && min_rgb > 240 {
                         ((255 - raw_u8 as u32) * 36).min(256)
                     } else {
                         256
@@ -516,9 +493,12 @@ impl FrameProcessor for McuDynamicProcessor {
             for x in 0..w {
                 let pixel = input.get_pixel(x as u32, y as u32);
                 let raw_y = (((pixel[0] as u32) * 77 + (pixel[1] as u32) * 150 + (pixel[2] as u32) * 29) >> 8) as u8;
+                let max_c = pixel[0].max(pixel[1]).max(pixel[2]);
+                let min_c = pixel[0].min(pixel[1]).min(pixel[2]);
                 // Minimum-RGB dark-channel guidance in high exposure:
-                let eff_y = if is_high_exposure {
-                    let min_c = pixel[0].min(pixel[1]).min(pixel[2]);
+                // Only engage when color saturation is low (washed-out white glare, max_c - min_c < 50).
+                // Protects deeply saturated colors (e.g. blue doorframe where max_c - min_c >= 50) from luma crushing.
+                let eff_y = if is_high_exposure && (max_c - min_c) < 50 {
                     ((raw_y as u32 * 141 + min_c as u32 * 115) >> 8) as u8
                 } else {
                     raw_y
@@ -572,32 +552,19 @@ impl FrameProcessor for McuDynamicProcessor {
                     let tone_mapped = self.config.autogating_lut.lookup(contrast);
                     let rgb = if self.config.display_mode == DisplayMode::FullColor {
                         let p = input.get_pixel(x as u32, out_y);
-                        let raw_y = (mid[x] as u32).max(1);
+                        let true_y = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8).max(1);
                         let tm = tone_mapped as u32;
+                        let ratio_q8 = (tm << 8) / true_y;
 
-                        let (r_col, g_col, b_col) = if is_high_exposure && tm < raw_y && mid[x] > 100 && mid[x] < 248 {
-                            let r_dim = (p[0] as i32 * tm as i32) / raw_y as i32;
-                            let g_dim = (p[1] as i32 * tm as i32) / raw_y as i32;
-                            let b_dim = (p[2] as i32 * tm as i32) / raw_y as i32;
-                            let tm_i = tm as i32;
-                            (
-                                (tm_i + (((r_dim - tm_i) * 371) >> 8)).clamp(0, 255) as u32,
-                                (tm_i + (((g_dim - tm_i) * 371) >> 8)).clamp(0, 255) as u32,
-                                (tm_i + (((b_dim - tm_i) * 371) >> 8)).clamp(0, 255) as u32,
-                            )
-                        } else {
-                            let ratio_q8 = (tm << 8) / raw_y;
-                            (
-                                ((p[0] as u32 * ratio_q8) >> 8).min(255),
-                                ((p[1] as u32 * ratio_q8) >> 8).min(255),
-                                ((p[2] as u32 * ratio_q8) >> 8).min(255),
-                            )
-                        };
+                        let r_col = ((p[0] as u32 * ratio_q8) >> 8).min(255);
+                        let g_col = ((p[1] as u32 * ratio_q8) >> 8).min(255);
+                        let b_col = ((p[2] as u32 * ratio_q8) >> 8).min(255);
 
                         let raw_u8 = mid[x];
+                        let min_rgb = p[0].min(p[1]).min(p[2]);
                         let chroma_atten_q8: u32 = if raw_u8 < 16 {
                             (raw_u8 as u32) * 16
-                        } else if raw_u8 > 248 {
+                        } else if raw_u8 > 248 && min_rgb > 240 {
                             ((255 - raw_u8 as u32) * 36).min(256)
                         } else {
                             256
@@ -641,32 +608,19 @@ impl FrameProcessor for McuDynamicProcessor {
                 let tone_mapped = self.config.autogating_lut.lookup(contrast);
                 let rgb = if self.config.display_mode == DisplayMode::FullColor {
                     let p = input.get_pixel(x as u32, last_y);
-                    let raw_y = (mid[x] as u32).max(1);
+                    let true_y = (((p[0] as u32) * 77 + (p[1] as u32) * 150 + (p[2] as u32) * 29) >> 8).max(1);
                     let tm = tone_mapped as u32;
+                    let ratio_q8 = (tm << 8) / true_y;
 
-                    let (r_col, g_col, b_col) = if is_high_exposure && tm < raw_y && mid[x] > 100 && mid[x] < 248 {
-                        let r_dim = (p[0] as i32 * tm as i32) / raw_y as i32;
-                        let g_dim = (p[1] as i32 * tm as i32) / raw_y as i32;
-                        let b_dim = (p[2] as i32 * tm as i32) / raw_y as i32;
-                        let tm_i = tm as i32;
-                        (
-                            (tm_i + (((r_dim - tm_i) * 371) >> 8)).clamp(0, 255) as u32,
-                            (tm_i + (((g_dim - tm_i) * 371) >> 8)).clamp(0, 255) as u32,
-                            (tm_i + (((b_dim - tm_i) * 371) >> 8)).clamp(0, 255) as u32,
-                        )
-                    } else {
-                        let ratio_q8 = (tm << 8) / raw_y;
-                        (
-                            ((p[0] as u32 * ratio_q8) >> 8).min(255),
-                            ((p[1] as u32 * ratio_q8) >> 8).min(255),
-                            ((p[2] as u32 * ratio_q8) >> 8).min(255),
-                        )
-                    };
+                    let r_col = ((p[0] as u32 * ratio_q8) >> 8).min(255);
+                    let g_col = ((p[1] as u32 * ratio_q8) >> 8).min(255);
+                    let b_col = ((p[2] as u32 * ratio_q8) >> 8).min(255);
 
                     let raw_u8 = mid[x];
+                    let min_rgb = p[0].min(p[1]).min(p[2]);
                     let chroma_atten_q8: u32 = if raw_u8 < 16 {
                         (raw_u8 as u32) * 16
-                    } else if raw_u8 > 248 {
+                    } else if raw_u8 > 248 && min_rgb > 240 {
                         ((255 - raw_u8 as u32) * 36).min(256)
                     } else {
                         256
