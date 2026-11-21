@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageBuffer, Rgb, RgbImage};
 use nightvision_core::{
     calculate_psnr, calculate_ssim, generate_synthetic_test_scene, CmosSensorConfig,
-    CmosSensorSimulator, DisplayMode, FrameProcessor, LuxLevel, NightVisionPipeline,
-    PipelineConfig,
+    CmosSensorSimulator, DisplayMode, FrameProcessor, HighlightAlgorithm, LuxLevel,
+    NightVisionPipeline, PipelineConfig,
 };
 use nightvision_mcu::{McuDynamicProcessor, McuEngineConfig, McuNightVisionEngine};
 
@@ -45,6 +45,10 @@ enum Commands {
         /// Tactical display mode
         #[arg(short, long, value_enum, default_value_t = ModeArg::FullColor)]
         mode: ModeArg,
+
+        /// Highlight recovery inpainting algorithm
+        #[arg(long, value_enum, default_value_t = AlgorithmArg::PushPullPde)]
+        algorithm: AlgorithmArg,
 
         /// Exposure boost multiplier
         #[arg(long, default_value_t = 2.5)]
@@ -94,6 +98,21 @@ enum Commands {
         #[arg(short, long, default_value = "include/nightvision_tables.h")]
         output: PathBuf,
     },
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
+enum AlgorithmArg {
+    PushPullPde,
+    DyadicJetPatch,
+}
+
+impl From<AlgorithmArg> for HighlightAlgorithm {
+    fn from(arg: AlgorithmArg) -> Self {
+        match arg {
+            AlgorithmArg::PushPullPde => HighlightAlgorithm::PushPullPde,
+            AlgorithmArg::DyadicJetPatch => HighlightAlgorithm::DyadicJetPatch,
+        }
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
@@ -273,6 +292,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             simulate_lux,
             backend,
             mode,
+            algorithm,
             exposure,
             gamma,
         } => {
@@ -305,6 +325,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     config.mode = mode.into();
                     config.enhancement.exposure_gain = exposure;
                     config.enhancement.gamma = gamma;
+                    config.highlight.algorithm = algorithm.into();
                     Box::new(NightVisionPipeline::new(config))
                 }
             };

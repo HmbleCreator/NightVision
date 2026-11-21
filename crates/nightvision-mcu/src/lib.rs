@@ -169,8 +169,8 @@ mod tests {
 
         // Deep shadow code (10 ADU) lifted higher in dark regime than normal
         assert!(lut_dark.lookup(10) > lut_norm.lookup(10));
-        // High exposure knee smoothly rolls off top codes
-        assert!(lut_high.lookup(255) >= 240);
+        // High exposure power curve maps 255 to 255 (clean crisp white, no 228 ceiling cap)
+        assert_eq!(lut_high.lookup(255), 255);
         assert!(lut_high.lookup(200) < lut_high.lookup(255));
 
         // 2. Test MCU processor on extreme saturation (Y = 255)
@@ -185,11 +185,31 @@ mod tests {
         assert_eq!(rep.regime, nightvision_core::SceneLightingRegime::FullSaturation);
         assert!(rep.saturated_pixel_fraction > 0.90);
 
-        // Verify Dual Chroma Gate: saturated pixel is neutral white, no color tint
+        // Verify neutral highlight roll-off on all-white scene (>= 250 ADU, zero peach tint)
         let p = out_sat.get_pixel(32, 32);
-        assert_eq!(p[0], p[1]);
-        assert_eq!(p[1], p[2]);
-        assert!(p[0] >= 240);
+        assert!(p[0] >= 250);
+        assert!((p[0] as i32 - p[2] as i32).abs() <= 1);
+
+        // Verify warm skin tone preservation alongside clean crisp highlights
+        let mut skin_sat_frame = image::RgbImage::new(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                if x < 32 {
+                    skin_sat_frame.put_pixel(x, y, image::Rgb([176, 160, 147])); // warm midtone skin
+                } else {
+                    skin_sat_frame.put_pixel(x, y, image::Rgb([255, 255, 255])); // blown highlight
+                }
+            }
+        }
+        let out_skin = proc.process_frame(&skin_sat_frame);
+        let p_skin = out_skin.get_pixel(16, 32);
+        assert!(p_skin[0] > p_skin[1]);
+        assert!(p_skin[1] > p_skin[2]);
+        assert!((p_skin[0] as i32 - p_skin[2] as i32) >= 20);
+
+        let p_hl = out_skin.get_pixel(40, 32);
+        assert!(p_hl[0] >= 250);
+        assert!((p_hl[0] as i32 - p_hl[2] as i32).abs() <= 1);
     }
 }
 

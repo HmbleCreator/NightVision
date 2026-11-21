@@ -17,6 +17,9 @@ pub struct FilmicConfig {
     /// Knee point in normalized [0, 1] linear space. Below this, the curve is identity.
     /// Default: 0.70 (~180 ADU). Pixels below knee are untouched (±0 ADU).
     pub knee: f32,
+    /// Ceiling asymptote in normalized [0, 1] linear space. Highlights roll off smoothly into this ceiling.
+    /// Default: 1.00 (~255 ADU). For high-exposure recovery, configured to 0.89 (~227 ADU).
+    pub ceiling: f32,
     /// Start of highlight desaturation ramp (normalized min-channel value).
     /// Default: 0.85 (~217 ADU). Below this, chroma is fully preserved.
     pub desat_start: f32,
@@ -29,6 +32,7 @@ impl Default for FilmicConfig {
     fn default() -> Self {
         Self {
             knee: 0.70,
+            ceiling: 1.0,
             desat_start: 0.85,
             desat_end: 248.0 / 255.0,
         }
@@ -59,13 +63,21 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 /// - `f(1.0) = 1.0` (preserves white point at 255 ADU)
 #[inline]
 pub fn filmic_tonemap(x: f32, config: &FilmicConfig) -> f32 {
-    if x < config.knee {
+    let knee = config.knee;
+    let ceiling = config.ceiling;
+    if x < knee {
         x
     } else if x < 1.0 {
-        let u = (x - config.knee) / (1.0 - config.knee);
-        config.knee + (1.0 - config.knee) * (u * (1.0 + u - u * u))
+        let delta = 1.0 - knee;
+        if delta <= 1e-6 {
+            return ceiling;
+        }
+        let u = (x - knee) / delta;
+        let a = knee + 1.0 - 2.0 * ceiling;
+        let b = 3.0 * ceiling - knee - 2.0;
+        knee + u * (delta + u * (b + u * a))
     } else {
-        1.0
+        ceiling
     }
 }
 
@@ -265,5 +277,24 @@ mod tests {
             chroma_before,
             chroma_after
         );
+    }
+
+    #[test]
+    fn filmic_ceiling_compression() {
+        let cfg = FilmicConfig {
+            knee: 0.55,
+            ceiling: 0.89,
+            ..Default::default()
+        };
+        // Below knee identity
+        assert!((filmic_tonemap(0.50, &cfg) - 0.50).abs() < 1e-6);
+        // At 1.0 reaches ceiling 0.89
+        assert!((filmic_tonemap(1.00, &cfg) - 0.89).abs() < 1e-4);
+        // Above 1.0 clamped to ceiling 0.89
+        assert!((filmic_tonemap(1.50, &cfg) - 0.89).abs() < 1e-4);
+        // Continuous at knee
+        let delta = 1e-4_f32;
+        let slope = (filmic_tonemap(cfg.knee + delta, &cfg) - filmic_tonemap(cfg.knee - delta, &cfg)) / (2.0 * delta);
+        assert!((slope - 1.0).abs() < 0.02);
     }
 }

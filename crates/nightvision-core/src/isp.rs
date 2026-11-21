@@ -14,7 +14,7 @@ use image::{ImageBuffer, RgbImage};
 use rayon::prelude::*;
 use std::time::Instant;
 
-use crate::highlight_recovery::{recover_highlights_planar, HighlightScratch};
+use crate::highlight_recovery::HighlightScratch;
 use crate::modes::DisplayMode;
 use crate::optical_bloom::{inject_optical_bloom_planar, BloomScratch};
 use crate::pipeline::{PipelineConfig, StageBreakdown};
@@ -50,6 +50,7 @@ pub struct ImageSignalProcessor {
     // Auto-exposure scene luminance tracking with 16-frame EMA & deadband hysteresis
     smoothed_luma: f32,
     applied_knee_luma: f32,
+    pub last_p2_luma_adu: f32,
     pub last_exposure_report: ExposureMeteringReport,
 }
 
@@ -75,6 +76,7 @@ impl ImageSignalProcessor {
             bloom_scratch: BloomScratch::default(),
             smoothed_luma: 16.0,
             applied_knee_luma: 16.0,
+            last_p2_luma_adu: 0.0,
             last_exposure_report: ExposureMeteringReport::default(),
         }
     }
@@ -86,6 +88,7 @@ impl ImageSignalProcessor {
         self.temporal_luma_prev.fill(0.0);
         self.smoothed_luma = 16.0;
         self.applied_knee_luma = 16.0;
+        self.last_p2_luma_adu = 0.0;
         self.last_exposure_report = ExposureMeteringReport::default();
     }
 
@@ -116,11 +119,12 @@ impl ImageSignalProcessor {
 
         self.temporal_history_rgb.resize(n, [0.0; 3]);
         self.temporal_luma_prev.resize(n, 0.0);
-        self.highlight_scratch.ensure_capacity(n);
+        self.highlight_scratch.ensure_capacity_dims(n, w, h);
         self.bloom_scratch.ensure_capacity(n);
         self.frame_count = 0;
         self.smoothed_luma = 16.0;
         self.applied_knee_luma = 16.0;
+        self.last_p2_luma_adu = 0.0;
         self.last_exposure_report = ExposureMeteringReport::default();
     }
 
@@ -149,28 +153,15 @@ impl ImageSignalProcessor {
             self.execute_guided_spatial_filter(w, h, is_high_exposure);
         }
 
-        // Stage 2.5: Physical Highlight Recovery & Contrast-Gated Optical Bloom
-        if is_high_exposure {
-            if self.config.enable_highlight_recovery {
-                recover_highlights_planar(
-                    &mut self.y_plane,
-                    &mut self.cb_plane,
-                    &mut self.cr_plane,
-                    &mut self.highlight_scratch,
-                    w,
-                    h,
-                    &self.config.highlight,
-                );
-            }
-            if self.config.enable_optical_bloom {
-                inject_optical_bloom_planar(
-                    &mut self.y_plane,
-                    &mut self.bloom_scratch,
-                    w,
-                    h,
-                    &self.config.bloom,
-                );
-            }
+        // Stage 2.5: Contrast-Gated Optical Bloom in high-exposure regime
+        if is_high_exposure && self.config.enable_optical_bloom && !self.config.enable_highlight_recovery {
+            inject_optical_bloom_planar(
+                &mut self.y_plane,
+                &mut self.bloom_scratch,
+                w,
+                h,
+                &self.config.bloom,
+            );
         }
 
         // Stage 3: Fused Continuous Hermite Shadow-Knee, Reinhard Auto-Gating, Chroma Gate & Rendering
@@ -233,28 +224,15 @@ impl ImageSignalProcessor {
         }
         let spatial_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
-        // Highlight Recovery & Contrast-Gated Bloom in high-exposure regime
-        if is_high_exposure {
-            if self.config.enable_highlight_recovery {
-                recover_highlights_planar(
-                    &mut self.y_plane,
-                    &mut self.cb_plane,
-                    &mut self.cr_plane,
-                    &mut self.highlight_scratch,
-                    w,
-                    h,
-                    &self.config.highlight,
-                );
-            }
-            if self.config.enable_optical_bloom {
-                inject_optical_bloom_planar(
-                    &mut self.y_plane,
-                    &mut self.bloom_scratch,
-                    w,
-                    h,
-                    &self.config.bloom,
-                );
-            }
+        // Contrast-Gated Bloom in high-exposure regime
+        if is_high_exposure && self.config.enable_optical_bloom && !self.config.enable_highlight_recovery {
+            inject_optical_bloom_planar(
+                &mut self.y_plane,
+                &mut self.bloom_scratch,
+                w,
+                h,
+                &self.config.bloom,
+            );
         }
 
         // 3. Retinex (Replaced by Hermite Shadow-Knee: 0.0 ms)
@@ -301,10 +279,10 @@ impl ImageSignalProcessor {
             .map(|chunk| {
                 let mut s = 0.0f32;
                 let mut sat = 0usize;
-                let mut h = [0usize; 16];
+                let mut h = [0usize; 256];
                 for &y in chunk {
                     s += y;
-                    let bin = ((y * 15.99).floor() as usize).min(15);
+                    let bin = ((y * 255.0).round() as usize).min(255);
                     h[bin] += 1;
                     if y >= (250.0 / 255.0) {
                         sat += 1;
@@ -313,10 +291,10 @@ impl ImageSignalProcessor {
                 (s, sat, h)
             })
             .reduce(
-                || (0.0, 0, [0usize; 16]),
+                || (0.0, 0, [0usize; 256]),
                 |(s1, sat1, h1), (s2, sat2, h2)| {
-                    let mut h = [0usize; 16];
-                    for i in 0..16 {
+                    let mut h = [0usize; 256];
+                    for i in 0..256 {
                         h[i] = h1[i] + h2[i];
                     }
                     (s1 + s2, sat1 + sat2, h)
@@ -326,17 +304,27 @@ impl ImageSignalProcessor {
         let current_mean_adu = (sum_luma / (n as f32).max(1.0)) * 255.0;
         let sat_fraction = (sat_count as f32) / (n as f32).max(1.0);
 
+        let target_p2 = (n as f32 * 0.02) as usize;
         let target_p95 = (n as f32 * 0.95) as usize;
         let mut cum = 0usize;
-        let mut p95_bin = 15usize;
+        let mut p2_bin = 0usize;
+        let mut p95_bin = 255usize;
+        let mut found_p2 = false;
+
         for (bin, &count) in hist.iter().enumerate() {
             cum += count;
+            if !found_p2 && cum >= target_p2 {
+                p2_bin = bin;
+                found_p2 = true;
+            }
             if cum >= target_p95 {
                 p95_bin = bin;
                 break;
             }
         }
-        let p95_luma_adu = (p95_bin as f32 * 16.0 + 8.0).min(255.0);
+        let p2_luma_adu = p2_bin as f32;
+        let p95_luma_adu = (p95_bin as f32).min(255.0);
+        self.last_p2_luma_adu = p2_luma_adu;
 
         let report = ExposureMeteringReport::compute(current_mean_adu, p95_luma_adu, sat_fraction);
         self.last_exposure_report = report;
@@ -363,7 +351,7 @@ impl ImageSignalProcessor {
     /// and projects directly into planar Y, Cb, Cr memory in a single parallel pass.
     /// In severe high exposure (glare), blends standard BT.601 luma with min(R,G,B) dark channel
     /// guidance (0.55 * Y + 0.45 * min_c) to rescue surviving detail in unclipped color channels.
-    fn execute_temporal_and_planar_conversion(&mut self, input: &RgbImage, w: usize, _h: usize, is_high_exposure: bool) {
+    fn execute_temporal_and_planar_conversion(&mut self, input: &RgbImage, w: usize, _h: usize, _is_high_exposure: bool) {
         let enable_temporal = self.config.enable_temporal;
         let static_weight = self.config.temporal.static_blend_weight;
         let motion_weight = self.config.temporal.motion_blend_weight;
@@ -417,12 +405,7 @@ impl ImageSignalProcessor {
 
                     // Direct ITU-R BT.601 conversion into planar scratch buffers
                     let y_std = 0.299 * r_acc + 0.587 * g_acc + 0.114 * b_acc;
-                    y_row[x] = if is_high_exposure {
-                        let min_c = r_acc.min(g_acc).min(b_acc);
-                        0.55 * y_std + 0.45 * min_c
-                    } else {
-                        y_std
-                    };
+                    y_row[x] = y_std;
                     cb_row[x] = -0.168736 * r_acc - 0.331264 * g_acc + 0.5 * b_acc + 0.5;
                     cr_row[x] = 0.5 * r_acc - 0.418688 * g_acc - 0.081312 * b_acc + 0.5;
                 }
@@ -459,8 +442,8 @@ impl ImageSignalProcessor {
             .zip(denoised_y.par_iter())
             .for_each(|(orig, &denoised)| {
                 let detail = *orig - denoised;
-                let boost = if is_high_exposure && *orig > (140.0 / 255.0) && *orig < (252.0 / 255.0) {
-                    2.25
+                let boost = if is_high_exposure {
+                    0.0
                 } else {
                     1.25
                 };
@@ -525,6 +508,116 @@ impl ImageSignalProcessor {
         let mode = self.config.mode;
         let sat_boost = self.config.saturation_boost;
 
+        if is_high_exposure {
+            let p2 = self.last_p2_luma_adu;
+            let mean = effective_scene_luma_adu;
+            let t_s = ((mean - 145.0) / 30.0).clamp(0.0, 1.0);
+            let s = t_s * t_s * (3.0 - 2.0 * t_s);
+            let g = (0.65 * p2 * s).clamp(0.0, 32.0);
+            let g_norm = g / 255.0;
+            let denom = (1.0 - g_norm).max(1e-4);
+
+            let gamma_factor = ((mean - 140.0) / 75.0).clamp(0.0, 1.0);
+            let gamma = 1.0 + 0.55 * gamma_factor;
+
+            let temporal_rgb = &self.temporal_history_rgb;
+
+            output
+                .as_flat_samples_mut()
+                .samples
+                .par_chunks_exact_mut(w * 3)
+                .enumerate()
+                .for_each(|(py, row_bytes)| {
+                    let row_offset = py * w;
+                    for px in 0..w {
+                        let idx = row_offset + px;
+                        let [r_in, g_in, b_in] = temporal_rgb[idx];
+
+                        let r_d = ((r_in - g_norm).max(0.0) / denom).clamp(0.0, 1.0);
+                        let g_d = ((g_in - g_norm).max(0.0) / denom).clamp(0.0, 1.0);
+                        let b_d = ((b_in - g_norm).max(0.0) / denom).clamp(0.0, 1.0);
+
+                        let r_rgb = r_d.powf(gamma);
+                        let g_rgb = g_d.powf(gamma);
+                        let b_rgb = b_d.powf(gamma);
+
+                        let y_d = 0.299 * r_d + 0.587 * g_d + 0.114 * b_d;
+                        let f_yd = y_d.powf(gamma);
+                        let scale = f_yd / y_d.max(1e-4);
+
+                        let r_luma = r_d * scale;
+                        let g_luma = g_d * scale;
+                        let b_luma = b_d * scale;
+
+                        let r_out = (0.55 * r_rgb + 0.45 * r_luma).clamp(0.0, 1.0);
+                        let g_out = (0.55 * g_rgb + 0.45 * g_luma).clamp(0.0, 1.0);
+                        let b_out = (0.55 * b_rgb + 0.45 * b_luma).clamp(0.0, 1.0);
+
+                        let (r, g, b) = match mode {
+                            DisplayMode::FullColor => (
+                                (r_out * 255.0).round().clamp(0.0, 255.0) as u8,
+                                (g_out * 255.0).round().clamp(0.0, 255.0) as u8,
+                                (b_out * 255.0).round().clamp(0.0, 255.0) as u8,
+                            ),
+                            DisplayMode::TacticalWhitePhosphor => {
+                                let comp = 0.299 * r_out + 0.587 * g_out + 0.114 * b_out;
+                                let v = (comp * 255.0).round();
+                                let highlight_desat = comp.powf(4.0).clamp(0.0, 1.0);
+                                let r_scale = 0.96 * (1.0 - highlight_desat) + 1.0 * highlight_desat;
+                                let g_scale = 0.98 * (1.0 - highlight_desat) + 1.0 * highlight_desat;
+                                let b_scale = 1.02 * (1.0 - highlight_desat) + 1.0 * highlight_desat;
+                                (
+                                    (v * r_scale).round().clamp(0.0, 255.0) as u8,
+                                    (v * g_scale).round().clamp(0.0, 255.0) as u8,
+                                    (v * b_scale).round().clamp(0.0, 255.0) as u8,
+                                )
+                            }
+                            DisplayMode::TacticalGreenPhosphor => {
+                                let comp = 0.299 * r_out + 0.587 * g_out + 0.114 * b_out;
+                                let v = (comp.powf(0.88) * 255.0).clamp(0.0, 255.0);
+                                let r_base = v * 0.22;
+                                let g_base = v * 1.00;
+                                let b_base = v * 0.30;
+                                let highlight_desat = comp.powf(3.5).clamp(0.0, 1.0);
+                                let desat_val = (comp * 255.0).clamp(0.0, 255.0);
+                                (
+                                    (r_base * (1.0 - highlight_desat) + desat_val * highlight_desat).round().clamp(0.0, 255.0) as u8,
+                                    (g_base * (1.0 - highlight_desat) + desat_val * highlight_desat).round().clamp(0.0, 255.0) as u8,
+                                    (b_base * (1.0 - highlight_desat) + desat_val * highlight_desat).round().clamp(0.0, 255.0) as u8,
+                                )
+                            }
+                            DisplayMode::HighContrastRecon => {
+                                let comp = 0.299 * r_out + 0.587 * g_out + 0.114 * b_out;
+                                let v = (comp * 255.0).clamp(0.0, 255.0);
+                                let r_base = v * 1.00;
+                                let g_base = v * 0.75;
+                                let b_base = v * 0.15;
+                                let bloom = comp.powf(4.0).clamp(0.0, 1.0);
+                                let r = r_base * (1.0 - bloom) + 255.0 * bloom;
+                                let g = g_base * (1.0 - bloom) + 245.0 * bloom;
+                                let b = b_base * (1.0 - bloom) + 220.0 * bloom;
+                                (
+                                    r.round().clamp(0.0, 255.0) as u8,
+                                    g.round().clamp(0.0, 255.0) as u8,
+                                    b.round().clamp(0.0, 255.0) as u8,
+                                )
+                            }
+                            DisplayMode::ThermalFusion => {
+                                let comp = 0.299 * r_out + 0.587 * g_out + 0.114 * b_out;
+                                let v = (comp * 255.0).round() as u8;
+                                (v, (v.wrapping_mul(2)).min(255), 255 - v)
+                            }
+                        };
+
+                        let out_idx = px * 3;
+                        row_bytes[out_idx] = r;
+                        row_bytes[out_idx + 1] = g;
+                        row_bytes[out_idx + 2] = b;
+                    }
+                });
+            return;
+        }
+
         // Dynamic Hermite Shadow-Knee Lift for ultra-dark scenes (< 8.0 ADU)
         let shadow_boost = if is_ultra_dark {
             let darkness = ((8.0 - effective_scene_luma_adu) / 7.5).clamp(0.0, 1.0);
@@ -585,30 +678,32 @@ impl ImageSignalProcessor {
                         };
                         comp_base.clamp(0.0, 1.0)
                     } else if is_high_exposure {
-                        // Full-Range Glare Dehazing Curve:
-                        // 1. Optical Glare Floor Subtraction: haze_floor = clamp((mean_luma - 130.0) * 0.65, 0.0, 75.0)
-                        // 2. Smooth linear toe roll-off below haze_floor (0..haze_floor -> 0..12 ADU)
-                        // 3. Monotonic C1-continuous Hermite highlight shoulder strictly anchoring at 255 ADU
-                        let haze_floor_norm = (((effective_scene_luma_adu - 130.0) * 0.65).clamp(0.0, 75.0)) / 255.0;
-                        let toe_max = if haze_floor_norm > (10.0 / 255.0) { 12.0 / 255.0 } else { 0.0 };
-
-                        let val = if luma < haze_floor_norm {
-                            if haze_floor_norm > 0.0 {
-                                toe_max * (luma / haze_floor_norm)
-                            } else {
-                                0.0
-                            }
+                        if self.config.enable_highlight_recovery {
+                            // Luminance already physically recovered and tonemapped via C¹ filmic soft-knee
+                            luma
                         } else {
-                            let t = ((luma - haze_floor_norm) / (1.0 - haze_floor_norm)).clamp(0.0, 1.0);
-                            let t_film = if t < 0.70 {
-                                t
+                            // Full-Range Glare Dehazing Curve fallback
+                            let haze_floor_norm = (((effective_scene_luma_adu - 130.0) * 0.65).clamp(0.0, 75.0)) / 255.0;
+                            let toe_max = if haze_floor_norm > (10.0 / 255.0) { 12.0 / 255.0 } else { 0.0 };
+
+                            let val = if luma < haze_floor_norm {
+                                if haze_floor_norm > 0.0 {
+                                    toe_max * (luma / haze_floor_norm)
+                                } else {
+                                    0.0
+                                }
                             } else {
-                                let u = (t - 0.70) / 0.30;
-                                0.70 + 0.30 * (u * (1.0 + u - u * u))
+                                let t = ((luma - haze_floor_norm) / (1.0 - haze_floor_norm)).clamp(0.0, 1.0);
+                                let t_film = if t < 0.70 {
+                                    t
+                                } else {
+                                    let u = (t - 0.70) / 0.30;
+                                    0.70 + 0.30 * (u * (1.0 + u - u * u))
+                                };
+                                toe_max + (1.0 - toe_max) * t_film
                             };
-                            toe_max + (1.0 - toe_max) * t_film
-                        };
-                        val.clamp(0.0, 1.0)
+                            val.clamp(0.0, 1.0)
+                        }
                     } else {
                         let boosted = luma * exposure_gain;
                         let lifted = boosted.powf(gamma_exp);
@@ -624,10 +719,14 @@ impl ImageSignalProcessor {
                     // Bidirectional Dual Chroma Gate:
                     // 1. Lower gate for dark shadows (Y < 15 ADU) to prevent blue/magenta noise blotches
                     let lower_chroma_gate = (raw_luma / (15.0 / 255.0)).clamp(0.0, 1.0);
-                    // 2. Upper gate for extreme highlights
-                    // In high exposure: threshold at 248 ADU (7 ADU roll-off) so 230..248 ADU retains blue/purple saturation
+                    // 2. Upper gate for extreme highlights:
+                    // When highlight recovery is active, we preserve authentic inpainted skin chroma
                     let upper_chroma_gate = if is_high_exposure {
-                        ((1.0 - raw_luma) / (7.0 / 255.0)).clamp(0.0, 1.0)
+                        if self.config.enable_highlight_recovery {
+                            1.0
+                        } else {
+                            ((1.0 - raw_luma) / (7.0 / 255.0)).clamp(0.0, 1.0)
+                        }
                     } else {
                         ((1.0 - raw_luma) / (25.0 / 255.0)).clamp(0.0, 1.0)
                     };
@@ -652,12 +751,14 @@ impl ImageSignalProcessor {
                             let mut r_n = r_f.clamp(0.0, 1.0);
                             let mut g_n = g_f.clamp(0.0, 1.0);
                             let mut b_n = b_f.clamp(0.0, 1.0);
-                            crate::soft_knee::highlight_desaturate(
-                                &mut r_n,
-                                &mut g_n,
-                                &mut b_n,
-                                &filmic_cfg,
-                            );
+                            if !(is_high_exposure && self.config.enable_highlight_recovery) {
+                                crate::soft_knee::highlight_desaturate(
+                                    &mut r_n,
+                                    &mut g_n,
+                                    &mut b_n,
+                                    &filmic_cfg,
+                                );
+                            }
                             (
                                 (r_n * 255.0).round() as u8,
                                 (g_n * 255.0).round() as u8,

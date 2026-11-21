@@ -24,7 +24,7 @@ pub mod temporal;
 
 pub use enhancement::{apply_clahe, apply_exposure_and_autogating, apply_retinex, EnhancementConfig};
 pub use fusion::fuse_exposure_bracket;
-pub use highlight_recovery::{recover_highlights_planar, HighlightConfig, HighlightScratch};
+pub use highlight_recovery::{recover_highlights_planar, HighlightAlgorithm, HighlightConfig, HighlightScratch};
 pub use isp::ImageSignalProcessor;
 pub use metrics::{calculate_psnr, calculate_snr_db, calculate_ssim};
 pub use modes::{render_mode, DisplayMode};
@@ -186,11 +186,11 @@ mod tests {
         assert!(rep.saturated_pixel_fraction > 0.90);
         assert!(rep.recommended_ev_shift < -3.0);
 
-        // Verify Dual Chroma Gate: saturated highlight must be pure neutral white without color fringing
+        // Verify Dual Chroma Gate: saturated highlight must be pure neutral without color fringing
         let sample = out_sat.get_pixel(32, 32);
         assert_eq!(sample[0], sample[1]);
         assert_eq!(sample[1], sample[2]);
-        assert!(sample[0] >= 240); // Preserved highlight headroom
+        assert!(sample[0] >= 250); // Saturated specular highlight preserved at clean crisp white
 
         // 2. Test ultra-dark scene (Y < 8.0 ADU)
         isp.reset();

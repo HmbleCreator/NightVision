@@ -78,35 +78,14 @@ impl AutoGatingLut {
                 table[i] = (compressed * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         } else if is_high_exposure {
-            // High exposure / Severe glare regime:
-            // Full-Range Glare Dehazing Curve:
-            // 1. Optical Glare Floor Subtraction: haze_floor = clamp((mean_luma - 130.0) * 0.65, 0.0, 75.0)
-            //    (For static MCU export with mean_luma ~ 200, gives 45.5 ADU, matching target ~45 ADU)
-            // 2. Smooth linear toe roll-off below haze_floor (0..haze_floor -> 0..12 ADU)
-            // 3. Monotonic concave power pull-down (gamma = 3.2), strictly anchoring f(255) = 255
-            let haze_floor = ((mean_luma - 130.0) * 0.65).clamp(0.0, 75.0);
-            let toe_max = if haze_floor > 10.0 { 12.0 } else { 0.0 };
+            // Adaptive Anchored Power curve f(t) = t^gamma without ceiling cap (f(0) = 0, f(255) = 255)
+            let gamma_factor = ((mean_luma - 140.0) / 75.0).clamp(0.0, 1.0);
+            let gamma = 1.0 + 0.55 * gamma_factor;
 
             for i in 0..256 {
-                let x = i as f32;
-                let val = if x < haze_floor {
-                    if haze_floor > 0.0 {
-                        toe_max * (x / haze_floor)
-                    } else {
-                        0.0
-                    }
-                } else {
-                    let t = ((x - haze_floor) / (255.0 - haze_floor)).clamp(0.0, 1.0);
-                    // C¹-continuous Hermite highlight shoulder strictly anchoring at 255 ADU
-                    let t_film = if t < 0.70 {
-                        t
-                    } else {
-                        let u = (t - 0.70) / 0.30;
-                        0.70 + 0.30 * (u * (1.0 + u - u * u))
-                    };
-                    toe_max + (255.0 - toe_max) * t_film
-                };
-                table[i] = val.round().clamp(0.0, 255.0) as u8;
+                let x = (i as f32) / 255.0;
+                let y = x.powf(gamma);
+                table[i] = (y * 255.0).round().clamp(0.0, 255.0) as u8;
             }
         } else {
             let gamma_exp = if gamma > 0.0 && gamma < 1.0 {
