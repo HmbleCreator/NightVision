@@ -194,3 +194,21 @@ Evaluated across extreme photodiode well saturation ($255\text{ ADU}$), localize
 #### Diffuse Outdoor Glare Recovery (`High_Glare_Bloom.png`)
 ![High Glare Bloom Comparison](assets/benchmarks/High_Glare_Bloom_comparison.png)
 
+---
+
+### 3. Production Architecture Decision & Highlight Recovery Scorecard
+
+Following empirical benchmarking across physical, spatial, and generative highlight synthesis pipelines on extreme overexposure ($27.3\%\text{--}86.3\%$ clipped pixels), NightVision ships **pure Stage 1 Physical ISP paired with Hardware Auto-Exposure Control (AEC)**. All generative and spatial hallucination heuristics are permanently dropped.
+
+| Approach Tested | Visual Outcome on Blown Portrait & Window | Real-Time / Production Fit | Verdict |
+| :--- | :--- | :--- | :--- |
+| **Stage 1 Physical ISP** (`isp.rs` + `mcu_pipeline.rs`: glare floor inversion + 55/45 power LUT) | Deep crisp blacks, intact vibrant cyan doorframe ($B-R = 216.2\text{ ADU}$), clean warm midtones, zero moats/stripes, clean window dehaze | $< 2.0\text{ ms}$ Desktop / $\sim 17\text{--}21\text{ ms}$ MCU ($48\text{--}60\text{ FPS}$), $0.059\text{ ADU}$ parity, 28/28 tests green | **SHIP (Primary Production Engine)** |
+| **Hardware AEC Telemetry** (`fast_aec_probe` + `AecSensorCommand`) | Prevents highlights from hitting $255\text{ ADU}$ on frame $N+1$ (converges in 3–4 frames with target headroom $\ge 12\text{ ADU}$) | $0.47\text{--}0.59\text{ ms}$ at stride 8, zero runtime allocations, embedded-ready | **SHIP (Live Real-Time Streams)** |
+| **Spatial Chroma Heuristics** (1-Jet, PatchMatch, Push-Pull Chroma, Scanline EMA) | Metallic craters, grey bleached moats, cyan doorframe wiped to concrete grey ($0.38\times$ bleed), or horizontal scanline stripes across face | Inconsistent across diverse scenes, breaks generality | **DROPPED** |
+| **SD 1.5 + LCM-LoRA Inpainting** (OpenVINO Iris Xe GPU) | Recovered facial structure in tight crops, but full-frame latent downsampling ($64 \times 85$) melted tooth edges and created glowing face cutout seams and fake wall shelves | $23\text{--}49\text{ s}$ latency, $\sim 4\text{ GB}$ weights, heavy dependencies | **DROPPED** |
+| **ONNX Face Restorers** (`GFPGAN v1.4`, `CodeFormer w=0.5 / 0.8`) | Bit-exact outside face ($0.00\text{ ADU}$ diff) and fast non-face bypass ($41.8\text{ ms}$), but left $253\text{ ADU}$ cheek visually untouched while adding faint teal tooth tint / nose speck | $1.8\text{--}3.0\text{ s}$ latency, $\sim 710\text{ MB}$ weights, redundant | **DROPPED** |
+
+#### Key Takeaway on 0.0-Bit Information Recovery
+When a photodiode is triple-clipped at $255\text{ ADU}$ in linear capture ($0.0\text{ bits}$ of residual gradient information), the true physical solution in real-time camera systems is **closed-loop Hardware AEC** (backing down sensor integration time or analog gain within 3–4 frames) rather than generative hallucination. Stage 1 restores all unclipped and glare-veiled scene energy with $100\%$ mathematical monotonicity and zero artifacts, while AEC eliminates subsequent blowout at the sensor hardware interface.
+
+
